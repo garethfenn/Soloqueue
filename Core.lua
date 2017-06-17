@@ -1,6 +1,10 @@
 Soloqueue = LibStub("AceAddon-3.0"):NewAddon("Soloqueue", "AceConsole-3.0");
 
 local eventFrame = nil
+local BRACKETS = { "2v2", "3v3", "5v5", "RBG" }
+
+local attempts = 0
+local MAX_ATTEMPTS = 3
 
 local SoloqueueLDB = LibStub("LibDataBroker-1.1"):NewDataObject("Soloqueue", {
 	type = "data source",
@@ -11,14 +15,43 @@ local SoloqueueLDB = LibStub("LibDataBroker-1.1"):NewDataObject("Soloqueue", {
 
 local icon = LibStub("LibDBIcon-1.0");
 
-local function eventHandler(self, event, unit, ...)
-  if event == "INSPECT_HONOR_UPDATE" then
-  		print("Honor Ready");
-    	--onHonorInspectReady()
-  elseif event == "INSPECT_READY" then
-  	    print("Inspect Ready");
-    	--onInspectReady()
-  end
+local function getCurrentRatings()
+	local succsess = false;
+  	if attempts >= MAX_ATTEMPTS then
+  		attempts = 0;
+    	return false
+  	end
+  	attempts = attempts + 1
+
+  	targetCurrentRatings = {}
+  	for i, b in pairs(BRACKETS) do
+  		local cr = GetInspectArenaData(i)
+  		if cr > 0 then succsess = true end
+    	targetCurrentRatings[i] = cr
+  	end
+
+	ClearInspectPlayer();
+	eventFrame:UnregisterEvent("INSPECT_READY");
+	eventFrame:UnregisterEvent("INSPECT_HONOR_UPDATE");
+
+  	if (succsess == true) then
+	  	for i, r in pairs(targetCurrentRatings) do
+	    	print (BRACKETS[i] .. " : " .. r)
+	  	end
+  	else
+  		print ("All 0. Retrying...")
+  		Soloqueue:GetRatings("target");
+  	end
+end
+
+local function eventHandler(self, event)
+	print("got event:" .. event)
+  	if event == "INSPECT_HONOR_UPDATE" then
+  		getCurrentRatings();
+  	elseif event == "INSPECT_READY" then
+  	    eventFrame:RegisterEvent("INSPECT_HONOR_UPDATE");
+ 		RequestInspectHonorData();
+  	end
 end
 
 function Soloqueue:OnInitialize()
@@ -32,7 +65,7 @@ function Soloqueue:OnInitialize()
 	});
 
 	-- Commands
-	self:RegisterChatCommand("soloqueue", "GetRatings");
+	self:RegisterChatCommand("soloqueue", "GetAllRatings");
 
 	-- Minimap
 	icon:Register("Soloqueue", SoloqueueLDB, self.db.profile.minimap);
@@ -42,12 +75,32 @@ function Soloqueue:OnInitialize()
 	eventFrame:SetScript("OnEvent", eventHandler);
 end;
 
-function Soloqueue:GetRatings()
-	self:Print("Getting rating...");
-	local playerName = UnitName("player");
-	eventFrame:RegisterEvent("INSPECT_READY")
-    NotifyInspect(playerName)
+function Soloqueue:GetAllRatings()
+	self:Print("Getting ratings...");
+
+	local selfName = UnitName("player");
+	--self:GetRatings("player");
+	self:GetRatings("target");
+
+	--if IsInRaid() then
+	--    for i = 1, 10 do
+	--    	local playerName = UnitName('raid' .. i);
+	--        if (playerName and (playerName ~= selfName)) then
+	--            self:GetRatings('raid' .. i);
+	--        end
+	--    end
+	--end
+
+end
+
+function Soloqueue:GetRatings(player)
+	local playerName = UnitName(player);
+	print(playerName .. " ratings:");
+	eventFrame:RegisterEvent("INSPECT_READY");
+    NotifyInspect(player);
 end;
+
+names = GetHomePartyInfo()
 
 function Soloqueue:getNameRealmSlug()
   local name, realm = UnitName(TARGET)
