@@ -1,0 +1,8 @@
+## Interface: 40200
+## Version: 0.1
+## Title: Soloqueue
+## Author: Gareth Fenn
+## Notes: Solo queue
+
+embeds.xml
+Core.lua
