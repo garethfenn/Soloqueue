@@ -1,9 +1,9 @@
 Soloqueue = LibStub("AceAddon-3.0"):NewAddon("Soloqueue", "AceConsole-3.0");
 local eventFrame = nil
 
--- Operation types
-local OP_GET_CUR_RATING, OP_QUEUE, OP_CHECKTEAMMATES = 0, 1, 2;
-local operation = OP_GET_CUR_RATING;
+-- States
+local STATE_GET_GET_RATING, STATE_QUEUE, STATE_WAIT_TEAMMATES, STATE_CHECK_TEAMMATES = 0, 1, 2, 3;
+local state = STATE_GET_GET_RATING;
 
 -- Stack of players to get ratings from
 local player_stack = {}
@@ -16,6 +16,7 @@ local MAX_ATTEMPTS = 3
 -- 5v5 isn't used anymore...
 local BRACKETS = { "2v2", "3v3", "5v5", "RBG" }
 
+local CR_MINIMUM = 1200;
 local CR_WINDOW_INCREMENT = 100;
 
 -- Forward declarate some functions
@@ -25,7 +26,7 @@ local SoloqueueLDB = LibStub("LibDataBroker-1.1"):NewDataObject("Soloqueue", {
 	type = "data source",
 	text = "Soloqueue",
 	icon = "Interface\\Icons\\Achievement_arena_2v2_7",
-	OnClick = function(clickedframe, button) Soloqueue:Queue() end,
+	OnClick = function(clickedframe, button) Soloqueue:StateMachine() end,
 });
 
 local icon = LibStub("LibDBIcon-1.0");
@@ -59,10 +60,9 @@ function Soloqueue:PrintRatings(player, ratings)
 end
 
 function CallTheCallback(player, ratings)
-	--print("Callback operation " .. operation)
-  	if operation == OP_QUEUE then
+  	if state == STATE_GET_GET_RATING then
 		Soloqueue:GetPlayerRatingCallback(player, ratings);
-  	elseif operation == OP_CHECKTEAMMATES then
+  	elseif state == STATE_CHECK_TEAMMATES then
 		Soloqueue:CheckTeamMatesCallback(player, ratings);
   	end
 end;
@@ -71,7 +71,7 @@ local function eventHandler(self, event)
 	--print("got event:" .. event)
   	if event == "INSPECT_HONOR_UPDATE" then
   		eventFrame:UnregisterEvent("INSPECT_HONOR_UPDATE");
-  		getCurrentRatings();
+  		parseArenaRatings();
   	elseif event == "INSPECT_READY" then
   		eventFrame:UnregisterEvent("INSPECT_READY");
   	    eventFrame:RegisterEvent("INSPECT_HONOR_UPDATE");
@@ -99,43 +99,50 @@ function Soloqueue:OnInitialize()
 	eventFrame = CreateFrame("Frame", "SoloqueueEventFrame", UIParent)
 	eventFrame:SetScript("OnEvent", eventHandler);
 
+	hooksecurefunc(C_LFGList, "RemoveListing", function(self)
+		if (state == STATE_WAIT_TEAMMATES) then
+			state = STATE_GET_GET_RATING;
+		end
+	end);
+
 	-- Init context
-	self.CurCr = 0;
-	self.CRWindow = 0;
+	self.CallbackPending = false;
+	self.CRUpper = 0;
+	self.CRLower = 0;
 end;
 
-function getCurrentRatings()
+function parseArenaRatings()
 	local succsess = false;
 	local player = Soloqueue:CurPlayer();
 
-  	targetCurrentRatings = {}
+  	ratings = {}
   	for i, b in pairs(BRACKETS) do
   		local cr = GetInspectArenaData(i)
   		if cr > 0 then succsess = true end
-    	targetCurrentRatings[i] = cr;
+    	ratings[i] = cr;
   	end
 
   	ClearInspectPlayer();
 
   	if (succsess == true) then
-		CallTheCallback(player, targetCurrentRatings);
+		CallTheCallback(player, ratings);
 		Soloqueue:PopPlayer();
 		attempts = 0;
 	else
 		attempts = attempts + 1
 		if attempts >= MAX_ATTEMPTS then
-			CallTheCallback(player, targetCurrentRatings);
+			CallTheCallback(player, ratings);
   			Soloqueue:PopPlayer();
   			attempts = 0;
   		end
   	end
 
   	if (Soloqueue:CurPlayer()) then
-		Soloqueue:GetRatings();
+		Soloqueue:InitRatingRequest();
 	end
 end
 
-function Soloqueue:GetRatings()
+function Soloqueue:InitRatingRequest()
 	local player = Soloqueue:CurPlayer();
 	if (player) then
 		eventFrame:RegisterEvent("INSPECT_READY");
@@ -143,12 +150,21 @@ function Soloqueue:GetRatings()
     end
 end;
 
-function Soloqueue:Queue()
-	if operation == OP_GET_CUR_RATING then
+function Soloqueue:StateMachine()
+
+	--print ("Current state:" .. state)
+
+	if (self.CallbackPending == true) then
+		return;
+	end
+
+	if state == STATE_GET_GET_RATING then
 		self:GetPlayerRating();
-	elseif operation == OP_QUEUE then
+	elseif state == STATE_QUEUE then
 		self:QueueGame();
-	elseif operation == OP_CHECKTEAMMATES then
+	elseif state == STATE_WAIT_TEAMMATES then
+		self:WaitTeammates();
+	elseif state == STATE_CHECK_TEAMMATES then
 		self:CheckTeammates();
 	else
 		print ("Invalid state!");
@@ -156,34 +172,48 @@ function Soloqueue:Queue()
 end
 
 function Soloqueue:GetPlayerRating()
-	operation = OP_QUEUE;
-	self.CRWindow = self.CRWindow + CR_WINDOW_INCREMENT;
-	self:Print("Finding group...");
+	self:Print("Refreshing current player ratings...");
 	self:PutPlayer("player");
-	self:GetRatings();
+	self.CallbackPending = true;
+	self:InitRatingRequest();
 end
 
 function Soloqueue:GetPlayerRatingCallback(player, ratings)
-	self.curCr = ratings[1];
-	operation = OP_QUEUE;
+	if (self.CRUpper > CR_MINIMUM) then
+		self.CRUpper = ratings[1];
+		self.CRLower = ratings[1] - CR_WINDOW_INCREMENT;
+	else
+		self.CRUpper = CR_MINIMUM;
+		self.CRLower = 0;
+	end
+
+	state = STATE_QUEUE;
+	self.CallbackPending = false;
 end
 
 function Soloqueue:QueueGame()
-	local rating_high = self.curCr;
-	local rating low = 0;
-	if ((self.curCr - self.CRWindow) > 0) then
-		rating_low = self.curCr - self.CRWindow;
+	self:Print ("Finding game with rating " .. self.CRLower .. ":" .. self.CRUpper);
+	C_LFGList.CreateListing(7, "Soloqueue", 0, 0, "", "Do not join unless your arena rating is between #L:".. self.CRLower .. " and #H:" .. self.CRUpper, false, 0);
+	state = STATE_WAIT_TEAMMATES
+end
+
+function Soloqueue:WaitTeammates()
+	if (self.CRLower >= CR_WINDOW_INCREMENT) then
+		self.CRLower = self.CRLower - CR_WINDOW_INCREMENT;
+	elseif (self.CRLower > 0) then
+		self.CRLower = 0;
+	else
+		self:Print ("Already at lowest rating. Sorry!");
+		return;
 	end
 
-	print ("Finding game with rating " .. rating_low .. ":" .. rating_high);
-	C_LFGList.CreateListing(7, "Soloqueue", 0, 0, "", "Do not join unless your arena CR is between #L:".. rating_low .. " and #H:" .. rating_high, false, 0);
-
-	-- Reset state
-	operation = OP_GET_CUR_RATING
+	self:Print ("Reduced rating requirement. Repress button.");
+	C_LFGList.RemoveListing();
+	state = STATE_QUEUE;
 end
 
 function Soloqueue:CheckTeammates()
-	operation = OP_CHECKTEAMMATES;
+	state = STATE_CHECK_TEAMMATES;
 	self:Print("Checking teammates ratings are correct...");
 
 	local selfName = UnitName('player');
@@ -194,10 +224,12 @@ function Soloqueue:CheckTeammates()
 	            self:PutPlayer('raid' .. i);
 	        end
 	    end
-	    self:GetRatings();
+	    self.CallbackPending = true;
+	    self:InitRatingRequest();
 	end
 end
 
 function Soloqueue:CheckTeamMatesCallback(player, ratings)
 	self:PrintRatings(player, targetCurrentRatings);
+	self.CallbackPending = false;
 end
