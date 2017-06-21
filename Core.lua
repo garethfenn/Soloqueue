@@ -2,7 +2,7 @@ Soloqueue = LibStub("AceAddon-3.0"):NewAddon("Soloqueue", "AceConsole-3.0");
 local eventFrame = nil
 
 -- States
-local STATE_GET_GET_RATING, STATE_QUEUE, STATE_WAIT_TEAMMATES, STATE_CHECK_TEAMMATES = 0, 1, 2, 3;
+local STATE_GET_GET_RATING, STATE_LOOK_FOR_GROUP, STATE_CREATE_GROUP, STATE_WAIT_TEAMMATES, STATE_CHECK_TEAMMATES = 0, 1, 2, 3, 4;
 local state = STATE_GET_GET_RATING;
 
 -- Stack of players to get ratings from
@@ -68,7 +68,7 @@ function CallTheCallback(player, ratings)
 end;
 
 local function eventHandler(self, event)
-	--print("got event:" .. event)
+	print("got event:" .. event)
   	if event == "INSPECT_HONOR_UPDATE" then
   		eventFrame:UnregisterEvent("INSPECT_HONOR_UPDATE");
   		parseArenaRatings();
@@ -76,6 +76,14 @@ local function eventHandler(self, event)
   		eventFrame:UnregisterEvent("INSPECT_READY");
   	    eventFrame:RegisterEvent("INSPECT_HONOR_UPDATE");
  		RequestInspectHonorData();
+  	elseif event == "LFG_LIST_SEARCH_RESULTS_RECEIVED" then
+  		eventFrame:UnregisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED");
+		Soloqueue:LookForGroupCallback();
+  	elseif event == "LFG_LIST_SEARCH_FAILED" then
+  		eventFrame:UnregisterEvent("LFG_LIST_SEARCH_FAILED");
+		Soloqueue:LookForGroupCallback();
+  	else
+  		print ("Unexpected event");
   	end
 end
 
@@ -90,7 +98,7 @@ function Soloqueue:OnInitialize()
 	});
 
 	-- Commands
-	self:RegisterChatCommand("soloqueue", "CheckTeammates");
+	self:RegisterChatCommand("soloqueue", "LookForGroup");
 
 	-- Minimap
 	icon:Register("Soloqueue", SoloqueueLDB, self.db.profile.minimap);
@@ -160,8 +168,10 @@ function Soloqueue:StateMachine()
 
 	if state == STATE_GET_GET_RATING then
 		self:GetPlayerRating();
-	elseif state == STATE_QUEUE then
-		self:QueueGame();
+	elseif state == STATE_LOOK_FOR_GROUP then
+		self:LookForGroup();
+	elseif state == STATE_CREATE_GROUP then
+		self:CreateGroup();
 	elseif state == STATE_WAIT_TEAMMATES then
 		self:WaitTeammates();
 	elseif state == STATE_CHECK_TEAMMATES then
@@ -187,12 +197,36 @@ function Soloqueue:GetPlayerRatingCallback(player, ratings)
 		self.CRLower = 0;
 	end
 
-	state = STATE_QUEUE;
+	state = STATE_LOOK_FOR_GROUP;
 	self.CallbackPending = false;
 end
 
-function Soloqueue:QueueGame()
-	self:Print ("Finding game with rating " .. self.CRLower .. ":" .. self.CRUpper);
+function Soloqueue:LookForGroup()
+	eventFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED");
+	eventFrame:RegisterEvent('LFG_LIST_SEARCH_FAILED')
+	local languages = C_LFGList.GetLanguageSearchFilter();
+	C_LFGList.Search(4, LFGListSearchPanel_ParseSearchTerms("healer"), 0, 8, languages)
+end
+
+function Soloqueue:LookForGroupCallback()
+	local numResults, results = C_LFGList.GetSearchResults()
+	print(numResults);
+	if numResults > 0 then
+	    -- deep-filter results
+	    for _,id in ipairs(results) do
+	        local _,_,_,description,_,_,_,_,_,_,_,_,_,_ = C_LFGList.GetSearchResultInfo(id)
+	        if description then
+	            print(description);
+	        end
+	    end
+	else
+		print("No results")
+		state = STATE_CREATE_GROUP;
+	end
+end
+
+function Soloqueue:CreateGroup()
+	self:Print ("Creating group with rating requirements " .. self.CRLower .. ":" .. self.CRUpper);
 	C_LFGList.CreateListing(7, "Soloqueue", 0, 0, "", "Do not join unless your arena rating is between #L:".. self.CRLower .. " and #H:" .. self.CRUpper, false, 0);
 	state = STATE_WAIT_TEAMMATES
 end
@@ -209,7 +243,7 @@ function Soloqueue:WaitTeammates()
 
 	self:Print ("Reduced rating requirement. Repress button.");
 	C_LFGList.RemoveListing();
-	state = STATE_QUEUE;
+	state = STATE_LOOK_FOR_GROUP;
 end
 
 function Soloqueue:CheckTeammates()
