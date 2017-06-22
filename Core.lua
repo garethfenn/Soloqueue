@@ -59,7 +59,7 @@ function Soloqueue:PrintRatings(player, ratings)
   	end
 end
 
-function CallTheCallback(player, ratings)
+function Soloqueue:CallRatingCallback(player, ratings)
   	if state == STATE_GET_GET_RATING then
 		Soloqueue:GetPlayerRatingCallback(player, ratings);
   	elseif state == STATE_CHECK_TEAMMATES then
@@ -68,10 +68,10 @@ function CallTheCallback(player, ratings)
 end;
 
 local function eventHandler(self, event)
-	print("got event:" .. event)
+	--print("got event:" .. event)
   	if event == "INSPECT_HONOR_UPDATE" then
   		eventFrame:UnregisterEvent("INSPECT_HONOR_UPDATE");
-  		parseArenaRatings();
+  		Soloqueue:ParseArenaRatings();
   	elseif event == "INSPECT_READY" then
   		eventFrame:UnregisterEvent("INSPECT_READY");
   	    eventFrame:RegisterEvent("INSPECT_HONOR_UPDATE");
@@ -119,9 +119,9 @@ function Soloqueue:OnInitialize()
 	self.CRLower = 0;
 end;
 
-function parseArenaRatings()
+function Soloqueue:ParseArenaRatings()
 	local succsess = false;
-	local player = Soloqueue:CurPlayer();
+	local player = self:CurPlayer();
 
   	ratings = {}
   	for i, b in pairs(BRACKETS) do
@@ -133,20 +133,20 @@ function parseArenaRatings()
   	ClearInspectPlayer();
 
   	if (succsess == true) then
-		CallTheCallback(player, ratings);
-		Soloqueue:PopPlayer();
+		self:CallRatingCallback(player, ratings);
+		self:PopPlayer();
 		attempts = 0;
 	else
 		attempts = attempts + 1
 		if attempts >= MAX_ATTEMPTS then
-			CallTheCallback(player, ratings);
-  			Soloqueue:PopPlayer();
+			self:CallRatingCallback(player, ratings);
+  			self:PopPlayer();
   			attempts = 0;
   		end
   	end
 
-  	if (Soloqueue:CurPlayer()) then
-		Soloqueue:InitRatingRequest();
+  	if (self:CurPlayer()) then
+		self:InitRatingRequest();
 	end
 end
 
