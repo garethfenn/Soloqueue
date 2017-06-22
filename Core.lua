@@ -31,39 +31,6 @@ local SoloqueueLDB = LibStub("LibDataBroker-1.1"):NewDataObject("Soloqueue", {
 
 local icon = LibStub("LibDBIcon-1.0");
 
-function Soloqueue:IsInGroupOrRaid()
-	if IsInGroup() or IsInGroup() then
-		return true;
-	else
-		return false;
-	end
-end
-
-function Soloqueue:GroupStateInvalid()
-
-	if state == STATE_GET_GET_RATING then
-		if self:IsInGroupOrRaid() then 
-			self.Print("Must leave group.");
-			return true;
-		end
-	elseif (state == STATE_LOOK_FOR_GROUP) or (state == STATE_CREATE_GROUP) then
-		if self:IsInGroupOrRaid() then 
-			self.Print("Resetting soloqueue");
-			state = STATE_GET_GET_RATING;
-			return true;
-		end
-	elseif state == STATE_CHECK_TEAMMATES then
-		if not self:IsInGroupOrRaid() then 
-			self.Print("Resetting soloqueue");
-			state = STATE_GET_GET_RATING;
-			return true;
-		end
-	end
-
-	return false;
-end
-
-
 function Soloqueue:CurPlayer()
 	if player_stack_idx > 0 then
 		return player_stack[player_stack_idx];
@@ -112,10 +79,6 @@ local function eventHandler(self, event, ...)
   	elseif event == "LFG_LIST_SEARCH_RESULTS_RECEIVED" then
   		eventFrame:UnregisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED");
 		Soloqueue:LookForGroupCallback();
-  	elseif event == "LFG_LIST_APPLICANT_UPDATED" then
-		Soloqueue:ApplicantEventHandler(...);
-  	elseif event == "GROUP_ROSTER_UPDATE" then
-		Soloqueue:RosterUpdateEventHandler();
   	else
   		print ("Unexpected event");
   	end
@@ -132,7 +95,7 @@ function Soloqueue:OnInitialize()
 	});
 
 	-- Commands
-	self:RegisterChatCommand("soloqueue", "LookForGroup");
+	self:RegisterChatCommand("soloqueue", "InviteApplications");
 
 	-- Minimap
 	icon:Register("Soloqueue", SoloqueueLDB, self.db.profile.minimap);
@@ -151,6 +114,7 @@ function Soloqueue:OnInitialize()
 	self.CallbackPending = false;
 	self.CRUpper = 0;
 	self.CRLower = 0;
+	self.invitees = {};
 end
 
 function Soloqueue:ParseArenaRatings()
@@ -196,8 +160,6 @@ function Soloqueue:StateMachine()
 
 	--print ("Current state:" .. state)
 
-	if Soloqueue:GroupStateInvalid() then return end
-
 	if (self.CallbackPending == true) then return end
 
 	if state == STATE_GET_GET_RATING then
@@ -216,7 +178,6 @@ function Soloqueue:StateMachine()
 end
 
 function Soloqueue:GetPlayerRating()
-	if Soloqueue:GroupStateInvalid() then return end
 	self:Print("Refreshing current player ratings...");
 	self:PutPlayer("player");
 	self.CallbackPending = true;
@@ -237,7 +198,6 @@ function Soloqueue:GetPlayerRatingCallback(player, ratings)
 end
 
 function Soloqueue:LookForGroup()
-	if Soloqueue:GroupStateInvalid() then return end
 	eventFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED");
 	local languages = C_LFGList.GetLanguageSearchFilter();
 	C_LFGList.Search(4, LFGListSearchPanel_ParseSearchTerms("Soloqueue Game"), 0, 8, languages)
@@ -246,8 +206,7 @@ end
 function Soloqueue:LookForGroupCallback()
 	local numResults, results = C_LFGList.GetSearchResults()
 	if numResults > 0 then
-	    -- deep-filter results
-	    for _,id in ipairs(results) do
+	    for _,id in pairs(results) do
 	        local _,_,_,description,_,_,_,_,_,_,_,_,_,_ = C_LFGList.GetSearchResultInfo(id)
 	        if description then
 	            print(description);
@@ -260,27 +219,52 @@ function Soloqueue:LookForGroupCallback()
 end
 
 function Soloqueue:CreateGroup()
-	if Soloqueue:GroupStateInvalid() then return end
 	self:Print ("Creating group with rating requirements " .. self.CRLower .. ":" .. self.CRUpper);
-	eventFrame:RegisterEvent("LFG_LIST_APPLICANT_UPDATED");
-	eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE");
 	C_LFGList.CreateListing(7, "Soloqueue", 0, 0, "", "Do not join unless your arena rating is between #L:".. self.CRLower .. " and #H:" .. self.CRUpper, false, 0);
 	state = STATE_WAIT_TEAMMATES
+	self:InviteApplications()
 end
 
-function Soloqueue:RosterUpdateEventHandler()
-	-- Check for num people in group
+local function InviteApplicationsWrapper()
+	Soloqueue:InviteApplications()
 end
 
-function Soloqueue:ApplicantEventHandler(applicantID)
-	local id, status, pendingStatus, numMembers, isNew, comment = C_LFGList.GetApplicantInfo(applicantID)
-	print (id .. " " .. status .. " " .. pendingStatus .. " " .. numMembers .. " " .. isNew .. " " .. comment);
-	if (currentWQ and status == "inviteaccepted" and comment == "WorldQuestGroupFinderUser-"..currentWQ) then
-		if (numMembers > 1) then
-			C_LFGList:DeclineApplicant(applicantID);
-		else
-			C_LFGList:InviteApplicant(applicantID);
+function Soloqueue:InviteApplications()
+	print ("loop")
+	for _,application in ipairs(self.invitees) do
+		C_LFGList:DeclineApplicant(application);
+	end
+	self.invitees = {};
+
+	if (state ~= STATE_WAIT_TEAMMATES) then
+		return;
+	end
+
+	local players = GetNumGroupMembers();
+	local players_to_invite = (3 - players);
+	local invitations = 0
+	if (players_to_invite) then
+		local applications = C_LFGList.GetApplicants();
+		if (applications ~= nil) then
+			for _, application in pairs(applications) do
+				local id, status, pendingStatus, numMembers, isNew, comment = C_LFGList.GetApplicantInfo(application)
+				print (id .. " " .. status .. " " .. pendingStatus .. " " .. numMembers .. " " .. isNew .. " " .. comment);
+				if (numMembers <= players_to_invite) then
+					C_LFGList:InviteApplicant(application);
+					invitations = invitations + 1;
+					self.invitees[invitations] = application;
+					players_to_invite = players_to_invite - numMembers;
+				else
+					C_LFGList:DeclineApplicant(application);
+				end
+			end
 		end
+	end
+
+	if (players == 3) then
+		Soloqueue:QueueGame();
+	else
+		C_Timer.After(1, InviteApplicationsWrapper);
 	end
 end
 
@@ -294,13 +278,15 @@ function Soloqueue:WaitTeammates()
 		return;
 	end
 
-	self:Print ("Reduced rating requirement. Repress button.");
-	C_LFGList.RemoveListing();
-	state = STATE_LOOK_FOR_GROUP;
+	self:Print ("Reduced rating requirement.");
+	C_LFGList.UpdateListing(7, "Soloqueue", 0, 0, "", "Do not join unless your arena rating is between #L:".. self.CRLower .. " and #H:" .. self.CRUpper, false, 0);
+end
+
+function Soloqueue:QueueGame()
+	JoinBattlefield(5, true)
 end
 
 function Soloqueue:CheckTeammates()
-	if Soloqueue:GroupStateInvalid() then return end
 	self:Print("Checking teammates ratings are correct...");
 
 	local selfName = UnitName('player');
