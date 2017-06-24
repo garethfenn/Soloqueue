@@ -95,7 +95,7 @@ function Soloqueue:OnInitialize()
 	});
 
 	-- Commands
-	self:RegisterChatCommand("soloqueue", "InviteApplications");
+	self:RegisterChatCommand("soloqueue", "Test");
 
 	-- Minimap
 	icon:Register("Soloqueue", SoloqueueLDB, self.db.profile.minimap);
@@ -112,6 +112,7 @@ function Soloqueue:OnInitialize()
 
 	-- Init context
 	self.CallbackPending = false;
+	self.CR = 0;
 	self.CRUpper = 0;
 	self.CRLower = 0;
 	self.invitees = {};
@@ -185,6 +186,7 @@ function Soloqueue:GetPlayerRating()
 end
 
 function Soloqueue:GetPlayerRatingCallback(player, ratings)
+	self.CR = ratings[1];
 	if (self.CRUpper > CR_MINIMUM) then
 		self.CRUpper = ratings[1];
 		self.CRLower = ratings[1] - CR_WINDOW_INCREMENT;
@@ -200,7 +202,7 @@ end
 function Soloqueue:LookForGroup()
 	eventFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED");
 	local languages = C_LFGList.GetLanguageSearchFilter();
-	C_LFGList.Search(4, LFGListSearchPanel_ParseSearchTerms("Soloqueue Game"), 0, 8, languages)
+	C_LFGList.Search(4, LFGListSearchPanel_ParseSearchTerms("Soloqueue"), 0, 8, languages)
 end
 
 function Soloqueue:LookForGroupCallback()
@@ -209,7 +211,8 @@ function Soloqueue:LookForGroupCallback()
 	    for _,id in pairs(results) do
 	        local _,_,_,description,_,_,_,_,_,_,_,_,_,_ = C_LFGList.GetSearchResultInfo(id)
 	        if description then
-	            print(description);
+                local low, high = string.match(description, "#L:(%d+) and #H:(%d+)");
+				if self.CRUpper
 	        end
 	    end
 	else
@@ -305,4 +308,7 @@ end
 function Soloqueue:CheckTeamMatesCallback(player, ratings)
 	self:PrintRatings(player, targetCurrentRatings);
 	self.CallbackPending = false;
+end
+
+function Soloqueue:Test()
 end
