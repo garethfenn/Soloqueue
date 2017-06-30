@@ -63,7 +63,7 @@ function Soloqueue:CallRatingCallback(player, ratings)
 end
 
 local function eventHandler(self, event, ...)
-	--print("got event:" .. event)
+	print("got event:" .. event)
 	if event == "INSPECT_HONOR_UPDATE" then
 		eventFrame:UnregisterEvent("INSPECT_HONOR_UPDATE");
 		Soloqueue:ParseArenaRatings();
@@ -79,6 +79,11 @@ local function eventHandler(self, event, ...)
 	else
 		print ("Unexpected event: " .. event);
 	end
+end
+
+local function hook_SetAction(a, b, c, d, e)
+	print(type(a))
+	print(a)
 end
 
 function Soloqueue:OnInitialize()
@@ -107,6 +112,11 @@ function Soloqueue:OnInitialize()
 		end
 	end);
 
+	hooksecurefunc(C_LFGList, "InviteApplicant", hook_SetAction);
+
+	-- Set/reset macro
+	self:CreateMacro()
+
 	-- Init context
 	self.CallbackPending = false;
 	self.CR = 0;
@@ -115,7 +125,7 @@ function Soloqueue:OnInitialize()
 	self.player_stack = {};
 
 	-- Applying to groups
-	self.GroupIDs = {};
+	self.groupIDs = {};
 	self.pendingInvite = 0;
 
 	-- Looking for players
@@ -165,7 +175,7 @@ end
 
 function Soloqueue:StateMachine()
 
-	--print ("Current state:" .. state)
+	print ("Current state:" .. state)
 
 	if (self.CallbackPending == true) then return end
 
@@ -180,7 +190,7 @@ function Soloqueue:StateMachine()
 	elseif state == STATE_CREATE_GROUP then
 		self:CreateGroup();
 	elseif state == STATE_WAIT_TEAMMATES then
-		-- nothing to do
+		self:InviteApplications();
 	elseif state == STATE_CHECK_TEAMMATES then
 		-- nothing to do
 	else
@@ -205,24 +215,27 @@ function Soloqueue:LookForGroup()
 	self.CallbackPending = true;
 	eventFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED");
 	local languages = C_LFGList.GetLanguageSearchFilter();
-	C_LFGList.Search(4, LFGListSearchPanel_ParseSearchTerms("Soloqueue"), 0, 8, languages)
+	C_LFGList.Search(6, LFGListSearchPanel_ParseSearchTerms("Soloqueue"), 0, 8, languages) -- arena 4
 end
 
 function Soloqueue:LookForGroupCallback()
 	local numResults, results = C_LFGList.GetSearchResults()
 	if numResults > 0 then
 		for _,groupID in pairs(results) do
-			local _,_,_,description,_,_,_,_,_,_,_,_,_,_ = C_LFGList.GetSearchResultInfo(id)
+			local _,_,_,description,_,_,_,_,_,_,_,_,_,_ = C_LFGList.GetSearchResultInfo(groupID)
 			if description then
 				local low, high = string.match(description, "#L:(%d+) #H:(%d+)");
+				low = tonumber(low);
+				high = tonumber(high);
 				if ((self.CR >= low) and (self.CR < high)) then
-					table.insert(self.GroupIDs, groupID)
+					print (groupID)
+					table.insert(self.groupIDs, groupID)
 				end
 			end
 		end
 	end
 
-	if (table.getn(self.GroupIDs) == 0) then
+	if (table.getn(self.groupIDs) == 0) then
 		state = STATE_CREATE_GROUP;
 		if (self.CRUpper > CR_MINIMUM) then
 			self.CRUpper = ratings[1];
@@ -239,9 +252,12 @@ function Soloqueue:LookForGroupCallback()
 end
 
 function Soloqueue:ApplyToGroups()
+	print(ApplyToGroups)
+	self.CallbackPending = true;
 	eventFrame:RegisterEvent("LFG_LIST_APPLICATION_STATUS_UPDATED");
-	for groupID in self.groupIDs do
-		C_LFGList.ApplyToGroup(groupID, "Soloqueue-#CR:"..self.CR, false, false, true)
+	for _,groupID in pairs(self.groupIDs) do
+		print(groupID)
+		C_LFGList.ApplyToGroup(groupID, "Soloqueue #CR:" .. self.CR, false, false, true)
 	end
 end
 
@@ -250,17 +266,18 @@ function Soloqueue:ApplyToGroupsCallback(...)
 	--print ("app status, ID:" .. groupID .. ", newStatus: " .. newStatus)
 	if (newStatus == "invited") then
 		eventFrame:UnregisterEvent("LFG_LIST_APPLICATION_STATUS_UPDATED");
-		self.GroupIDs = {};
+		self.groupIDs = {};
 		self.pendingInvite = groupID;
 		state = STATE_PENDING_INVITE;
 	else
-		table.remove(self.GroupIDs, groupID)
-		if (table.getn(self.GroupIDs) == 0) then
+		table.remove(self.groupIDs, groupID)
+		if (table.getn(self.groupIDs) == 0) then
 			eventFrame:UnregisterEvent("LFG_LIST_APPLICATION_STATUS_UPDATED");
 			state = STATE_LOOK_FOR_GROUP;
 			Soloqueue:LookForGroup();
 		end
 	end
+	self.CallbackPending = false;
 end
 
 function Soloqueue:AcceptInvitation()
@@ -270,7 +287,7 @@ end
 
 function Soloqueue:CreateGroup()
 	self:Print ("Creating group with rating requirements " .. self.CRLower .. ":" .. self.CRUpper);
-	C_LFGList.CreateListing(7, "Soloqueue", 0, 0, "", "Do not join. #L:".. self.CRLower .. " #H:" .. self.CRUpper, false, 0);
+	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #L:".. self.CRLower .. " #H:" .. self.CRUpper, false, true); -- arena 7
 	state = STATE_WAIT_TEAMMATES
 	self.pendingInvites = 0;
 	self:InviteApplications();
@@ -288,22 +305,29 @@ function Soloqueue:InviteApplications()
 		local applications = C_LFGList.GetApplicants();
 		if (applications ~= nil) then
 			for _, application in pairs(applications) do
-				local id, status, pendingStatus, numMembers, isNew, comment = C_LFGList.GetApplicantInfo(application)
-				print (id .. " " .. status .. " " .. pendingStatus .. " " .. numMembers .. " " .. isNew .. " " .. comment);
+				local id, status, pendingStatus, numMembers, isNew, comment = C_LFGList.GetApplicantInfo(application);
 				if (numMembers <= players_to_invite) then
-					local CR = string.match(teststring, "Soloqueue #CR:(%d+)");
-					if (CR ~= nil) then
-						if (tonumber(CR) >= self.CRLower) then
-							C_LFGList:InviteApplicant(application);
-							self.pendingInvites = self.pendingInvites + 1;
-							players_to_invite = players_to_invite - numMembers;
-							C_Timer.After(1, function () Soloqueue:InviteApplicationTimeout(application) end)
+					if (comment ~= nil) then
+						local CR = string.match(comment, "Soloqueue #CR:(%d+)");
+						CR = tonumber(CR);
+						if (CR ~= nil) then
+							if (CR >= self.CRLower) then
+								print(type(id))
+								print(id)
+								C_LFGList:InviteApplicant(id);
+								self.pendingInvites = self.pendingInvites + 1;
+								players_to_invite = players_to_invite - numMembers;
+								--C_Timer.After(1, function () Soloqueue:InviteApplicationTimeout(application) end)
+							else
+								-- Applied with too low CR
+								C_LFGList:DeclineApplicant(application);
+							end
 						else
-							-- Applied with too low CR
+							-- Invalid CR string
 							C_LFGList:DeclineApplicant(application);
 						end
 					else
-						-- Invalid CR string
+						-- No comment provided
 						C_LFGList:DeclineApplicant(application);
 					end
 				end
@@ -326,7 +350,24 @@ function Soloqueue:ReduceRequirements()
 	C_LFGList.UpdateListing(7, "Soloqueue", 0, 0, "", "Do not join. #L:".. self.CRLower .. " #H:" .. self.CRUpper, false, 0);
 end
 
+function Soloqueue:CreateMacro()
+	local text =
+[[
+/soloqueue
+/run TogglePVPUI()
+/click PVPQueueFrameCategoryButton2
+/click ConquestFrame.Arena3v3
+/cick ConquestJoinButton
+/run TogglePVPUI()
+]]
+
+	DeleteMacro("Soloqueue")
+	CreateMacro("Soloqueue", "Achievement_arena_2v2_7", text)
+end
+
 function Soloqueue:Test()
+	print ("Test")
+	self:InviteApplications()
 end
 
 function Soloqueue:CheckTeammates()
