@@ -2,8 +2,8 @@ Soloqueue = LibStub("AceAddon-3.0"):NewAddon("Soloqueue", "AceConsole-3.0");
 local eventFrame = nil
 
 -- States
-local STATE_GET_GET_RATING, STATE_LOOK_FOR_GROUP, STATE_APPLY_TO_GROUPS, STATE_PENDING_INVITE, STATE_CREATE_GROUP, STATE_WAIT_TEAMMATES, STATE_CHECK_TEAMMATES = 0, 1, 2, 3, 4, 5, 6;
-local state = STATE_GET_GET_RATING;
+local STATE_GET_RATING, STATE_LOOK_FOR_GROUP, STATE_APPLY_TO_GROUPS, STATE_PENDING_INVITE, STATE_CREATE_GROUP, STATE_WAIT_TEAMMATES, STATE_CLOSE_POPUP, STATE_CHECK_TEAMMATES = 0, 1, 2, 3, 4, 5, 6, 7;
+local state = STATE_GET_RATING;
 
 -- Sometimes the ratings are not available first time around
 local attempts = 0
@@ -55,7 +55,7 @@ function Soloqueue:PrintRatings(player, ratings)
 end
 
 function Soloqueue:CallRatingCallback(player, ratings)
-	if state == STATE_GET_GET_RATING then
+	if state == STATE_GET_RATING then
 		Soloqueue:GetPlayerRatingCallback(player, ratings);
 	elseif state == STATE_CHECK_TEAMMATES then
 		Soloqueue:CheckTeamMatesCallback(player, ratings);
@@ -74,8 +74,11 @@ local function eventHandler(self, event, ...)
 	elseif event == "LFG_LIST_SEARCH_RESULTS_RECEIVED" then
 		eventFrame:UnregisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED");
 		Soloqueue:LookForGroupCallback();
-	elseif event == "LFG_LIST_APPLICATION_STATUS_UPDATED" then
+	elseif event == "PARTY_INVITE_REQUEST" then
 		Soloqueue:ApplyToGroupsCallback(...)
+	elseif event == "GROUP_JOINED" then
+		eventFrame:UnregisterEvent("GROUP_JOINED");
+		Soloqueue:UICallback();
 	else
 		print ("Unexpected event: " .. event);
 	end
@@ -108,7 +111,7 @@ function Soloqueue:OnInitialize()
 
 	hooksecurefunc(C_LFGList, "RemoveListing", function(self)
 		if (state == STATE_WAIT_TEAMMATES) then
-			state = STATE_GET_GET_RATING;
+			state = STATE_GET_RATING;
 		end
 	end);
 
@@ -120,12 +123,16 @@ function Soloqueue:OnInitialize()
 	-- Init context
 	self.CallbackPending = false;
 	self.CR = 0;
+	self.playerName = nil;
+	self.realm = nil;
 
 	-- Stack of players to get ratings from
 	self.player_stack = {};
 
 	-- Applying to groups
 	self.groupIDs = {};
+	self.leaders = {};
+	self.pendingLeader = nil
 	self.pendingInvite = 0;
 
 	-- Looking for players
@@ -177,16 +184,17 @@ function Soloqueue:StateMachine()
 
 	print ("Current state:" .. state)
 
-	if (self.CallbackPending == true) then return end
+	if (self.CallbackPending == true) then
+		print ("Callback pending ...")
+		return;
+	end
 
-	if state == STATE_GET_GET_RATING then
+	if state == STATE_GET_RATING then
 		self:GetPlayerRating();
 	elseif state == STATE_LOOK_FOR_GROUP then
 		self:LookForGroup();
 	elseif state == STATE_APPLY_TO_GROUPS then
-		self:ApplyToGroups();
-	elseif state == STATE_PENDING_INVITE then
-		self:AcceptInvitation()
+		self:ApplyToGroup();
 	elseif state == STATE_CREATE_GROUP then
 		self:CreateGroup();
 	elseif state == STATE_WAIT_TEAMMATES then
@@ -207,6 +215,7 @@ end
 
 function Soloqueue:GetPlayerRatingCallback(player, ratings)
 	self.CR = ratings[1];
+	self.playerName, self.realm = UnitFullName("player");
 	state = STATE_LOOK_FOR_GROUP;
 	self.CallbackPending = false;
 end
@@ -222,14 +231,14 @@ function Soloqueue:LookForGroupCallback()
 	local numResults, results = C_LFGList.GetSearchResults()
 	if numResults > 0 then
 		for _,groupID in pairs(results) do
-			local _,_,_,description,_,_,_,_,_,_,_,_,_,_ = C_LFGList.GetSearchResultInfo(groupID)
+			local _,_,_,description,_,_,_,_,_,_,_,_,leader,_ = C_LFGList.GetSearchResultInfo(groupID)
 			if description then
 				local low, high = string.match(description, "#L:(%d+) #H:(%d+)");
 				low = tonumber(low);
 				high = tonumber(high);
 				if ((self.CR >= low) and (self.CR < high)) then
-					print (groupID)
-					table.insert(self.groupIDs, groupID)
+					table.insert(self.groupIDs, groupID);
+					table.insert(self.leaders, leader);
 				end
 			end
 		end
@@ -251,52 +260,55 @@ function Soloqueue:LookForGroupCallback()
 	self.CallbackPending = false;
 end
 
-function Soloqueue:ApplyToGroups()
-	print(ApplyToGroups)
-	self.CallbackPending = true;
-	eventFrame:RegisterEvent("LFG_LIST_APPLICATION_STATUS_UPDATED");
-	for _,groupID in pairs(self.groupIDs) do
-		print(groupID)
-		C_LFGList.ApplyToGroup(groupID, "Soloqueue #CR:" .. self.CR, false, false, true)
+function Soloqueue:ApplyToGroup()
+	eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
+	local group = table.remove(self.groupIDs, 1)
+	self.pendingLeader = table.remove(self.leaders, 1)
+	if (group) then
+		self.CallbackPending = true;
+		C_LFGList.ApplyToGroup(group, "Soloqueue #CR:" .. self.CR .. " #NAME:" .. self.playerName .. " #REALM:" .. self.realm, false, false, true)
+	else
+		state = STATE_LOOK_FOR_GROUP;
 	end
 end
 
-function Soloqueue:ApplyToGroupsCallback(...)
-	local groupID, newStatus = ...;
-	--print ("app status, ID:" .. groupID .. ", newStatus: " .. newStatus)
-	if (newStatus == "invited") then
-		eventFrame:UnregisterEvent("LFG_LIST_APPLICATION_STATUS_UPDATED");
+function Soloqueue:ApplyToGroupsCallback(sender)
+	if (sender == self.pendingLeader) then
+		AcceptGroup()
+		eventFrame:UnregisterEvent("PARTY_INVITE_REQUEST");
+		eventFrame:RegisterEvent("GROUP_JOINED")
 		self.groupIDs = {};
-		self.pendingInvite = groupID;
-		state = STATE_PENDING_INVITE;
+		self.leaders = {};
+	end
+end
+
+function Soloqueue:UICallback(sender)
+	self:Print("UiCallback")
+	if IsInRaid() or IsInGroup() then
+		StaticPopupSpecial_Hide(LFGInvitePopup);
+		state = STATE_CHECK_TEAMMATES;
 	else
-		table.remove(self.groupIDs, groupID)
-		if (table.getn(self.groupIDs) == 0) then
-			eventFrame:UnregisterEvent("LFG_LIST_APPLICATION_STATUS_UPDATED");
-			state = STATE_LOOK_FOR_GROUP;
-			Soloqueue:LookForGroup();
-		end
+		self:Print("Something went wrong... reset.")
+		state = STATE_GET_RATING;
 	end
 	self.CallbackPending = false;
 end
 
-function Soloqueue:AcceptInvitation()
-	C_LFGList.AcceptInvite(self.groupID);
-	state = STATE_CHECK_TEAMMATES;
-end
-
 function Soloqueue:CreateGroup()
 	self:Print ("Creating group with rating requirements " .. self.CRLower .. ":" .. self.CRUpper);
-	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #L:".. self.CRLower .. " #H:" .. self.CRUpper, false, true); -- arena 7
+	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #L:" .. self.CRLower .. " #H:" .. self.CRUpper, false, true); -- arena 7
 	state = STATE_WAIT_TEAMMATES
 	self.pendingInvites = 0;
 	self:InviteApplications();
 end
 
-function Soloqueue:InviteApplicationTimeout(application)
+function Soloqueue:InviteApplicationTimeout(name, application)
+	if not UnitInParty(name) then
+	self:Print (name .. " invitiation timeout... restarting group.")
+	LeaveParty();
 	C_LFGList:DeclineApplicant(application);
-	self.pendingInvites = self.pendingInvites - 1;
-	Soloqueue:InviteApplications();
+	self.pendingInvites = 0;
+	end
 end
 
 function Soloqueue:InviteApplications()
@@ -308,16 +320,17 @@ function Soloqueue:InviteApplications()
 				local id, status, pendingStatus, numMembers, isNew, comment = C_LFGList.GetApplicantInfo(application);
 				if (numMembers <= players_to_invite) then
 					if (comment ~= nil) then
-						local CR = string.match(comment, "Soloqueue #CR:(%d+)");
+						local CR = string.match(comment, "#CR:(%d+)");
+						local name = string.match(comment, "#NAME:(%a+)");
+						local realm = string.match(comment, "#REALM:(%a+)");
 						CR = tonumber(CR);
 						if (CR ~= nil) then
 							if (CR >= self.CRLower) then
-								print(type(id))
-								print(id)
-								C_LFGList:InviteApplicant(id);
+								local fullname = name .. "-" .. realm;
+								InviteUnit(fullname)
 								self.pendingInvites = self.pendingInvites + 1;
 								players_to_invite = players_to_invite - numMembers;
-								--C_Timer.After(1, function () Soloqueue:InviteApplicationTimeout(application) end)
+								C_Timer.After(2, function () Soloqueue:InviteApplicationTimeout(fullname, application) end)
 							else
 								-- Applied with too low CR
 								C_LFGList:DeclineApplicant(application);
@@ -366,8 +379,8 @@ function Soloqueue:CreateMacro()
 end
 
 function Soloqueue:Test()
-	print ("Test")
-	self:InviteApplications()
+	state = STATE_GET_RATING
+	self.CallbackPending = false;
 end
 
 function Soloqueue:CheckTeammates()
@@ -379,6 +392,15 @@ function Soloqueue:CheckTeammates()
 			local playerName = UnitName('raid' .. i);
 			if (playerName and (playerName ~= selfName)) then
 				self:PutPlayer('raid' .. i);
+			end
+		end
+		self.CallbackPending = true;
+		self:InitRatingRequest();
+	elseif IsInGroup() then
+		for i = 1, 5 do
+			local playerName = UnitName('party' .. i);
+			if (playerName and (playerName ~= selfName)) then
+				self:PutPlayer('party' .. i);
 			end
 		end
 		self.CallbackPending = true;
