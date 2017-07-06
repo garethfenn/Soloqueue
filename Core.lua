@@ -5,6 +5,9 @@ local eventFrame = nil
 local STATE_GET_RATING, STATE_LOOK_FOR_GROUP, STATE_APPLY_TO_GROUPS, STATE_PENDING_INVITE, STATE_CREATE_GROUP, STATE_WAIT_TEAMMATES, STATE_CLOSE_POPUP, STATE_CHECK_TEAMMATES = 0, 1, 2, 3, 4, 5, 6, 7;
 local state = STATE_GET_RATING;
 
+-- Messages
+local MSG_REQUEST_HANDSHAKE, MSG_HANDSHAKE, MSG_ACCEPT_HANDSHAKE, MSG_DECLINE = 0, 1, 2, 3;
+
 -- Sometimes the ratings are not available first time around
 local attempts = 0
 local MAX_ATTEMPTS = 3
@@ -79,6 +82,8 @@ local function eventHandler(self, event, ...)
 	elseif event == "GROUP_JOINED" then
 		eventFrame:UnregisterEvent("GROUP_JOINED");
 		Soloqueue:UICallback();
+	elseif event == "CHAT_MSG_WHISPER" then
+		Soloqueue:ChatMsgEventHandler(...)
 	else
 		print ("Unexpected event: " .. event);
 	end
@@ -109,6 +114,9 @@ function Soloqueue:OnInitialize()
 	eventFrame = CreateFrame("Frame", "SoloqueueEventFrame", UIParent)
 	eventFrame:SetScript("OnEvent", eventHandler);
 
+	-- Addon comms
+	eventFrame:RegisterEvent("CHAT_MSG_WHISPER");
+
 	hooksecurefunc(C_LFGList, "RemoveListing", function(self)
 		if (state == STATE_WAIT_TEAMMATES) then
 			state = STATE_GET_RATING;
@@ -130,15 +138,14 @@ function Soloqueue:OnInitialize()
 	self.player_stack = {};
 
 	-- Applying to groups
-	self.groupIDs = {};
 	self.leaders = {};
 	self.pendingLeader = nil
-	self.pendingInvite = 0;
 
 	-- Looking for players
 	self.CRUpper = 0;
 	self.CRLower = 0;
-	self.pendingInvites = 0;
+	self.pendingHandshakes = 0;
+	self.invitees = {};
 end
 
 function Soloqueue:ParseArenaRatings()
@@ -198,11 +205,69 @@ function Soloqueue:StateMachine()
 	elseif state == STATE_CREATE_GROUP then
 		self:CreateGroup();
 	elseif state == STATE_WAIT_TEAMMATES then
-		self:InviteApplications();
+		-- nothing to do
 	elseif state == STATE_CHECK_TEAMMATES then
 		-- nothing to do
 	else
 		print ("Invalid state!");
+	end
+end
+
+function Soloqueue:SendChatMessage(target, message)
+		SendChatMessage("#SQ:" .. message, "WHISPER", nil, target)
+end
+
+function Soloqueue:HandshakeTimeout(slot)
+	if not UnitInParty(self.invitees[slot]) then
+	self:Print (self.invitees[slot] .. " handshake timeout...")
+	self.invitees[slot] = nil;
+	self.pendingHandshakes = self.pendingHandshakes + 1;
+	end
+end
+
+function Soloqueue:InviteTimeout(name)
+	if not UnitInParty(name) then
+	self:Print (name .. " invitiation timeout... restarting group.")
+	LeaveParty();
+	C_LFGList:DeclineApplicant(application);
+	self.pendingHandshakes = 0;
+	end
+end
+
+function Soloqueue:TrackInvitee(invitee)
+	for slot = 1, 3 do
+		if self.invitees[slot] == nil then
+			self.invitees[slot] = invitee;
+			return;
+		end
+	end
+
+	print ("Error. No free slots?");
+	return nil;
+end
+
+function Soloqueue:ChatMsgEventHandler(string, sender)
+	local msg = string.match(string, "#SQ:(%d+)");
+	msg = tonumber(msg);
+
+	if msg == MSG_REQUEST_HANDSHAKE then
+		local freeHandshakes = (3 - self.pendingHandshakes);
+		if (freeHandshakes > 0) then
+			self:TrackInvitee(sender);
+			self:SendChatMessage(sender, MSG_HANDSHAKE);
+			C_Timer.After(2, function () Soloqueue:HandshakeTimeout(slot) end)
+			self.pendingHandshakes = self.pendingHandshakes + 1;
+		else
+			self:SendChatMessage(sender, MSG_DECLINE);
+		end
+	elseif msg == MSG_HANDSHAKE then
+		self.pendingLeader = sender;
+		eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
+		self:SendChatMessage(sender, MSG_ACCEPT_HANDSHAKE);
+	elseif msg == MSG_ACCEPT_HANDSHAKE then
+		InviteUnit(sender)
+	elseif msg == MSG_DECLINE then
+		print ("Declined!");
 	end
 end
 
@@ -237,14 +302,13 @@ function Soloqueue:LookForGroupCallback()
 				low = tonumber(low);
 				high = tonumber(high);
 				if ((self.CR >= low) and (self.CR < high)) then
-					table.insert(self.groupIDs, groupID);
 					table.insert(self.leaders, leader);
 				end
 			end
 		end
 	end
 
-	if (table.getn(self.groupIDs) == 0) then
+	if (table.getn(self.leaders) == 0) then
 		state = STATE_CREATE_GROUP;
 		if (self.CRUpper > CR_MINIMUM) then
 			self.CRUpper = ratings[1];
@@ -262,13 +326,8 @@ end
 
 function Soloqueue:ApplyToGroup()
 	eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
-	local group = table.remove(self.groupIDs, 1)
-	self.pendingLeader = table.remove(self.leaders, 1)
-	if (group) then
-		self.CallbackPending = true;
-		C_LFGList.ApplyToGroup(group, "Soloqueue #CR:" .. self.CR .. " #NAME:" .. self.playerName .. " #REALM:" .. self.realm, false, false, true)
-	else
-		state = STATE_LOOK_FOR_GROUP;
+	for _,leader in pairs(self.leaders) do
+		self:SendChatMessage(leader, MSG_REQUEST_HANDSHAKE);
 	end
 end
 
@@ -285,6 +344,7 @@ end
 function Soloqueue:UICallback(sender)
 	self:Print("UiCallback")
 	if IsInRaid() or IsInGroup() then
+		--StaticPopup_Hide("PARTY_INVITE");
 		StaticPopupSpecial_Hide(LFGInvitePopup);
 		state = STATE_CHECK_TEAMMATES;
 	else
@@ -298,55 +358,7 @@ function Soloqueue:CreateGroup()
 	self:Print ("Creating group with rating requirements " .. self.CRLower .. ":" .. self.CRUpper);
 	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #L:" .. self.CRLower .. " #H:" .. self.CRUpper, false, true); -- arena 7
 	state = STATE_WAIT_TEAMMATES
-	self.pendingInvites = 0;
-	self:InviteApplications();
-end
-
-function Soloqueue:InviteApplicationTimeout(name, application)
-	if not UnitInParty(name) then
-	self:Print (name .. " invitiation timeout... restarting group.")
-	LeaveParty();
-	C_LFGList:DeclineApplicant(application);
-	self.pendingInvites = 0;
-	end
-end
-
-function Soloqueue:InviteApplications()
-	local players_to_invite = (3 - self.pendingInvites);
-	if (players_to_invite) then
-		local applications = C_LFGList.GetApplicants();
-		if (applications ~= nil) then
-			for _, application in pairs(applications) do
-				local id, status, pendingStatus, numMembers, isNew, comment = C_LFGList.GetApplicantInfo(application);
-				if (numMembers <= players_to_invite) then
-					if (comment ~= nil) then
-						local CR = string.match(comment, "#CR:(%d+)");
-						local name = string.match(comment, "#NAME:(%a+)");
-						local realm = string.match(comment, "#REALM:(%a+)");
-						CR = tonumber(CR);
-						if (CR ~= nil) then
-							if (CR >= self.CRLower) then
-								local fullname = name .. "-" .. realm;
-								InviteUnit(fullname)
-								self.pendingInvites = self.pendingInvites + 1;
-								players_to_invite = players_to_invite - numMembers;
-								C_Timer.After(2, function () Soloqueue:InviteApplicationTimeout(fullname, application) end)
-							else
-								-- Applied with too low CR
-								C_LFGList:DeclineApplicant(application);
-							end
-						else
-							-- Invalid CR string
-							C_LFGList:DeclineApplicant(application);
-						end
-					else
-						-- No comment provided
-						C_LFGList:DeclineApplicant(application);
-					end
-				end
-			end
-		end
-	end
+	self.pendingHandshakes = 0;
 end
 
 function Soloqueue:ReduceRequirements()
