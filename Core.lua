@@ -2,7 +2,8 @@ Soloqueue = LibStub("AceAddon-3.0"):NewAddon("Soloqueue", "AceConsole-3.0");
 local eventFrame = nil
 
 -- States
-local STATE_GET_RATING, STATE_LOOK_FOR_GROUP, STATE_APPLY_TO_GROUPS, STATE_PENDING_INVITE, STATE_CREATE_GROUP, STATE_WAIT_TEAMMATES, STATE_CLOSE_POPUP, STATE_CHECK_TEAMMATES = 0, 1, 2, 3, 4, 5, 6, 7;
+local STATE_GET_RATING, STATE_LOOK_FOR_GROUP, STATE_APPLY_TO_GROUPS, STATE_WAITING_HANDSHAKE, STATE_WAITING_INVITE,
+      STATE_CREATE_GROUP, STATE_WAIT_TEAMMATES, STATE_DELIST_GROUP, STATE_ROLE_CHECK, STATE_CHECK_TEAMMATES = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9;
 local state = STATE_GET_RATING;
 
 -- Messages
@@ -16,16 +17,60 @@ local MAX_ATTEMPTS = 3
 local BRACKETS = { "2v2", "3v3", "5v5", "RBG" }
 
 local CR_MINIMUM = 1200;
-local CR_WINDOW_INCREMENT = 100;
+local CR_WINDOW_INCREMENT = 50;
 
 -- Forward declarate some functions
 local getCurrentRatings
+
+local SoloqueueLDB_MenuFrame;
+local SoloqueueLDB_Menu = {
+	{
+		text = "Soloqueue Menu",
+		isTitle = true,
+		notCheckable = true,
+		func = function() somesetting = not somesetting end
+	},
+	{
+		text = "Game type",
+		hasArrow = true,
+		notCheckable = true,
+		menuList = {
+			{ text = "2v2", notCheckable = false, checked = function() return (playersToInvite == 1) end, func = function() playersToInvite = 1; bracket = 1; end },
+			{ text = "3v3", notCheckable = false, checked = function() return (playersToInvite == 2) end, func = function() playersToInvite = 2; bracket = 2; end },
+			{ text = "RatedBG", notCheckable = false, checked = function() return (playersToInvite == 9) end, func = function() playersToInvite = 9; bracket = 4 end },
+		}
+	},
+	{
+		text = "Create macro",
+		notCheckable = true,
+		func = function() Soloqueue:CreateMacro(); end,
+	},
+	{
+		text = "Reset state",
+		notCheckable = true,
+		func = function() Soloqueue:ResetState(); end,
+	},
+	{
+		text = "",
+		notClickable = true,
+	},
+	{
+		text = "Close",
+		notCheckable = true,
+		func = function() CloseDropDownMenus (); end,
+	}
+}
 
 local SoloqueueLDB = LibStub("LibDataBroker-1.1"):NewDataObject("Soloqueue", {
 	type = "data source",
 	text = "Soloqueue",
 	icon = "Interface\\Icons\\Achievement_arena_2v2_7",
-	OnClick = function(clickedframe, button) Soloqueue:StateMachine() end,
+	OnClick = function (clickedframe, button)
+		EasyMenu (SoloqueueLDB_Menu, SoloqueueLDB_MenuFrame, "cursor", 10, 0, "MENU");
+	end,
+	OnTooltipShow = function (tt)
+		tt:AddLine("Soloqueue", 1, 1, 1);
+	end,
 });
 
 local icon = LibStub("LibDBIcon-1.0");
@@ -59,15 +104,18 @@ end
 
 function Soloqueue:CallRatingCallback(player, ratings)
 	if state == STATE_GET_RATING then
-		Soloqueue:GetPlayerRatingCallback(player, ratings);
+		Soloqueue:GetPlayerRatingCallback(ratings);
 	elseif state == STATE_CHECK_TEAMMATES then
 		Soloqueue:CheckTeamMatesCallback(player, ratings);
 	end
 end
 
 local function eventHandler(self, event, ...)
-	print("got event:" .. event)
-	if event == "INSPECT_HONOR_UPDATE" then
+	--print("got event:" .. event)
+	if event == "ADDON_LOADED" then
+		eventFrame:UnregisterEvent("ADDON_LOADED");
+		Soloqueue:WelcomeMessage();
+	elseif event == "INSPECT_HONOR_UPDATE" then
 		eventFrame:UnregisterEvent("INSPECT_HONOR_UPDATE");
 		Soloqueue:ParseArenaRatings();
 	elseif event == "INSPECT_READY" then
@@ -84,6 +132,11 @@ local function eventHandler(self, event, ...)
 		Soloqueue:UICallback();
 	elseif event == "CHAT_MSG_WHISPER" then
 		Soloqueue:ChatMsgEventHandler(...)
+	elseif event == "GROUP_ROSTER_UPDATE" then
+		Soloqueue:RosterUpdateEventHandler();
+	elseif event == "LFG_ROLE_CHECK_SHOW" then
+		eventFrame:UnregisterEvent("LFG_ROLE_CHECK_SHOW");
+		Soloqueue:RoleCheckEventHandler();
 	else
 		print ("Unexpected event: " .. event);
 	end
@@ -95,7 +148,6 @@ local function hook_SetAction(a, b, c, d, e)
 end
 
 function Soloqueue:OnInitialize()
-	self:Print("Soloqueue")
 	self.db = LibStub("AceDB-3.0"):New("SoloqueueDB", {
 		profile = {
 			minimap = {
@@ -104,8 +156,10 @@ function Soloqueue:OnInitialize()
 		},
 	});
 
+	SoloqueueLDB_MenuFrame = CreateFrame ("Frame", "SoloqueueLDB_MenuFrame", UIParent, "UIDropDownMenuTemplate");
+
 	-- Commands
-	self:RegisterChatCommand("soloqueue", "Test");
+	self:RegisterChatCommand("soloqueue", "StateMachine");
 
 	-- Minimap
 	icon:Register("Soloqueue", SoloqueueLDB, self.db.profile.minimap);
@@ -114,8 +168,14 @@ function Soloqueue:OnInitialize()
 	eventFrame = CreateFrame("Frame", "SoloqueueEventFrame", UIParent)
 	eventFrame:SetScript("OnEvent", eventHandler);
 
+	-- Welcome message if required
+	eventFrame:RegisterEvent("ADDON_LOADED");
+
 	-- Addon comms
 	eventFrame:RegisterEvent("CHAT_MSG_WHISPER");
+
+	-- Default DPS role.
+	SetPVPRoles(false, false, true)
 
 	hooksecurefunc(C_LFGList, "RemoveListing", function(self)
 		if (state == STATE_WAIT_TEAMMATES) then
@@ -123,16 +183,9 @@ function Soloqueue:OnInitialize()
 		end
 	end);
 
-	hooksecurefunc(C_LFGList, "InviteApplicant", hook_SetAction);
-
-	-- Set/reset macro
-	self:CreateMacro()
-
 	-- Init context
 	self.CallbackPending = false;
 	self.CR = 0;
-	self.playerName = nil;
-	self.realm = nil;
 
 	-- Stack of players to get ratings from
 	self.player_stack = {};
@@ -146,6 +199,15 @@ function Soloqueue:OnInitialize()
 	self.CRLower = 0;
 	self.pendingHandshakes = 0;
 	self.invitees = {};
+end
+
+function Soloqueue:WelcomeMessage()
+	if DisplayedWelcomeMessage == nil then
+		DisplayedWelcomeMessage = true;
+		playersToInvite = 2;
+		bracket = 2;
+		self:Print("Welcome to Soloqueue. Create your macro using the minimap button.")
+	end
 end
 
 function Soloqueue:ParseArenaRatings()
@@ -189,10 +251,10 @@ end
 
 function Soloqueue:StateMachine()
 
-	print ("Current state:" .. state)
+	--print ("Current state:" .. state)
 
 	if (self.CallbackPending == true) then
-		print ("Callback pending ...")
+		--print ("Callback pending ...")
 		return;
 	end
 
@@ -201,15 +263,11 @@ function Soloqueue:StateMachine()
 	elseif state == STATE_LOOK_FOR_GROUP then
 		self:LookForGroup();
 	elseif state == STATE_APPLY_TO_GROUPS then
-		self:ApplyToGroup();
+		self:ApplyToGroups();
 	elseif state == STATE_CREATE_GROUP then
 		self:CreateGroup();
-	elseif state == STATE_WAIT_TEAMMATES then
-		-- nothing to do
-	elseif state == STATE_CHECK_TEAMMATES then
-		-- nothing to do
-	else
-		print ("Invalid state!");
+	elseif state == STATE_DELIST_GROUP then
+		self:DelistGroup();
 	end
 end
 
@@ -217,33 +275,40 @@ function Soloqueue:SendChatMessage(target, message)
 		SendChatMessage("#SQ:" .. message, "WHISPER", nil, target)
 end
 
-function Soloqueue:HandshakeTimeout(slot)
-	if not UnitInParty(self.invitees[slot]) then
-	self:Print (self.invitees[slot] .. " handshake timeout...")
-	self.invitees[slot] = nil;
-	self.pendingHandshakes = self.pendingHandshakes + 1;
-	end
-end
-
-function Soloqueue:InviteTimeout(name)
-	if not UnitInParty(name) then
-	self:Print (name .. " invitiation timeout... restarting group.")
-	LeaveParty();
-	C_LFGList:DeclineApplicant(application);
-	self.pendingHandshakes = 0;
-	end
-end
-
-function Soloqueue:TrackInvitee(invitee)
-	for slot = 1, 3 do
-		if self.invitees[slot] == nil then
-			self.invitees[slot] = invitee;
-			return;
+function Soloqueue:RemoveInvitee(player)
+	if not UnitInParty(player) then
+		for slot, invitee in pairs(self.invitees) do
+			if invitee == player then
+				self.invitees[slot] = nil;
+				self.pendingHandshakes = self.pendingHandshakes + 1;
+				break;
+			end
 		end
 	end
+end
 
-	print ("Error. No free slots?");
-	return nil;
+function Soloqueue:HandshakeTimeout()
+	if (state == STATE_WAITING_HANDSHAKE) then
+		self:Print ("No handshakes... Looking again for groups. Keep clicking button...")
+		self.leaders = {};
+		state = STATE_LOOK_FOR_GROUP;
+	end
+end
+
+function Soloqueue:InviteTimeout()
+	if (state == STATE_WAITING_INVITE) then
+		self:Print ("Invite didn't come...")
+		self.pendingLeader = nil;
+		state = STATE_LOOK_FOR_GROUP;
+	end
+end
+
+function Soloqueue:AcceptInviteTimeout(name)
+	if not UnitInParty(name) then
+	self:Print (name .. " didn't accept timeout in time... restarting group. Keep clicking button...")
+	LeaveParty();
+	self.pendingHandshakes = 0;
+	end
 end
 
 function Soloqueue:ChatMsgEventHandler(string, sender)
@@ -251,36 +316,46 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 	msg = tonumber(msg);
 
 	if msg == MSG_REQUEST_HANDSHAKE then
-		local freeHandshakes = (3 - self.pendingHandshakes);
+		local freeHandshakes = (playersToInvite - self.pendingHandshakes);
 		if (freeHandshakes > 0) then
-			self:TrackInvitee(sender);
+			table.insert(self.invitees, sender);
 			self:SendChatMessage(sender, MSG_HANDSHAKE);
-			C_Timer.After(2, function () Soloqueue:HandshakeTimeout(slot) end)
+			C_Timer.After(2, function () Soloqueue:RemoveInvitee(sender) end)
 			self.pendingHandshakes = self.pendingHandshakes + 1;
 		else
 			self:SendChatMessage(sender, MSG_DECLINE);
 		end
 	elseif msg == MSG_HANDSHAKE then
-		self.pendingLeader = sender;
-		eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
-		self:SendChatMessage(sender, MSG_ACCEPT_HANDSHAKE);
+		if (state == STATE_WAITING_HANDSHAKE) then
+			self.pendingLeader = sender;
+			self.leaders = {};
+			eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
+			self:SendChatMessage(sender, MSG_ACCEPT_HANDSHAKE);
+			C_Timer.After(2, function () Soloqueue:InviteTimeout(sender) end)
+			state = STATE_WAITING_INVITE;
+		else
+			self:SendChatMessage(sender, MSG_DECLINE);
+		end
 	elseif msg == MSG_ACCEPT_HANDSHAKE then
+		eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 		InviteUnit(sender)
+		C_Timer.After(2, function () Soloqueue:AcceptInviteTimeout(sender) end)
 	elseif msg == MSG_DECLINE then
 		print ("Declined!");
+		if (state == STATE_WAIT_TEAMMATES) then
+			Soloqueue:RemoveInvitee(sender);
+		end
 	end
 end
 
 function Soloqueue:GetPlayerRating()
-	self:Print("Refreshing current player ratings...");
 	self:PutPlayer("player");
 	self.CallbackPending = true;
 	self:InitRatingRequest();
 end
 
-function Soloqueue:GetPlayerRatingCallback(player, ratings)
-	self.CR = ratings[1];
-	self.playerName, self.realm = UnitFullName("player");
+function Soloqueue:GetPlayerRatingCallback(ratings)
+	self.CR = ratings[bracket];
 	state = STATE_LOOK_FOR_GROUP;
 	self.CallbackPending = false;
 end
@@ -310,9 +385,9 @@ function Soloqueue:LookForGroupCallback()
 
 	if (table.getn(self.leaders) == 0) then
 		state = STATE_CREATE_GROUP;
-		if (self.CRUpper > CR_MINIMUM) then
-			self.CRUpper = ratings[1];
-			self.CRLower = ratings[1] - CR_WINDOW_INCREMENT;
+		if (self.CR >= CR_MINIMUM) then
+			self.CRUpper = ratings[bracket] + CR_WINDOW_INCREMENT;
+			self.CRLower = ratings[bracket] - CR_WINDOW_INCREMENT;
 		else
 			self.CRUpper = CR_MINIMUM;
 			self.CRLower = 0;
@@ -324,11 +399,13 @@ function Soloqueue:LookForGroupCallback()
 	self.CallbackPending = false;
 end
 
-function Soloqueue:ApplyToGroup()
+function Soloqueue:ApplyToGroups()
 	eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
 	for _,leader in pairs(self.leaders) do
 		self:SendChatMessage(leader, MSG_REQUEST_HANDSHAKE);
 	end
+	state = STATE_WAITING_HANDSHAKE;
+	C_Timer.After(2, function () Soloqueue:HandshakeTimeout() end)
 end
 
 function Soloqueue:ApplyToGroupsCallback(sender)
@@ -344,9 +421,9 @@ end
 function Soloqueue:UICallback(sender)
 	self:Print("UiCallback")
 	if IsInRaid() or IsInGroup() then
-		--StaticPopup_Hide("PARTY_INVITE");
 		StaticPopupSpecial_Hide(LFGInvitePopup);
-		state = STATE_CHECK_TEAMMATES;
+		eventFrame:RegisterEvent("LFG_ROLE_CHECK_SHOW");
+		state = STATE_ROLE_CHECK;
 	else
 		self:Print("Something went wrong... reset.")
 		state = STATE_GET_RATING;
@@ -355,10 +432,32 @@ function Soloqueue:UICallback(sender)
 end
 
 function Soloqueue:CreateGroup()
-	self:Print ("Creating group with rating requirements " .. self.CRLower .. ":" .. self.CRUpper);
+	self:Print ("No groups found. Creating group for ratings " .. self.CRLower .. ":" .. self.CRUpper);
 	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #L:" .. self.CRLower .. " #H:" .. self.CRUpper, false, true); -- arena 7
 	state = STATE_WAIT_TEAMMATES
 	self.pendingHandshakes = 0;
+end
+
+function Soloqueue:RosterUpdateEventHandler()
+	if (state == STATE_WAIT_TEAMMATES) then
+		local numPlayers = GetNumGroupMembers();
+		if (numPlayers == (playersToInvite + 1)) then -- including ourselves
+			eventFrame:UnregisterEvent("GROUP_ROSTER_UPDATE");
+			state = STATE_DELIST_GROUP;
+		end
+	end
+end
+
+function Soloqueue:DelistGroup()
+	self:Print("Full group. Press button to queue arena!")
+	C_LFGList.RemoveListing();
+	eventFrame:RegisterEvent("LFG_ROLE_CHECK_SHOW");
+	state = STATE_CHECK_TEAMMATES;
+end
+
+function Soloqueue:RoleCheckEventHandler()
+	CompleteLFGRoleCheck(true);
+	state = STATE_CHECK_TEAMMATES;
 end
 
 function Soloqueue:ReduceRequirements()
@@ -381,18 +480,25 @@ function Soloqueue:CreateMacro()
 /soloqueue
 /run TogglePVPUI()
 /click PVPQueueFrameCategoryButton2
+/click ConquestFrame.RatedBG
+/click ConquestJoinButton
 /click ConquestFrame.Arena3v3
-/cick ConquestJoinButton
+/click ConquestJoinButton
+/click ConquestFrame.Arena2v2
+/click ConquestJoinButton
 /run TogglePVPUI()
 ]]
 
 	DeleteMacro("Soloqueue")
 	CreateMacro("Soloqueue", "Achievement_arena_2v2_7", text)
+	self:Print("Created Soloqueue macro. Spam it to join your game.")
 end
 
-function Soloqueue:Test()
-	state = STATE_GET_RATING
+function Soloqueue:ResetState()
 	self.CallbackPending = false;
+	C_LFGList.RemoveListing();
+	state = STATE_GET_RATING;
+	self:Print("Reset state")
 end
 
 function Soloqueue:CheckTeammates()
@@ -424,3 +530,71 @@ function Soloqueue:CheckTeamMatesCallback(player, ratings)
 	self:PrintRatings(player, targetCurrentRatings);
 	self.CallbackPending = false;
 end
+
+----------------------------------------------------------
+-- Straight copy paste. Credit goes to Maunotavast-Zenedar
+-- https://eu.battle.net/forums/en/wow/topic/15161349869
+----------------------------------------------------------
+
+local function createbutton(button)
+	if _G[button] then return _G[button] end -- button already exists
+
+	local v = _G
+	for w in button:gmatch("[^%.]+") do
+		v = v[w]
+		if v == nil then return end
+	end
+
+	local b = CreateFrame("button", button, nil, "SecureActionButtonTemplate")
+	b:RegisterForClicks("AnyDown")
+	b:SetAttribute("type","click")
+	b:SetAttribute("clickbutton", v)
+	-- print("proxybutton created: "..button)
+
+	return b
+end
+
+local function createbuttons(buttons)
+	for _, button in ipairs(buttons) do
+		createbutton(button)
+	end
+end
+
+--------------------------
+-- Dynamic button creating
+--------------------------
+-- we'll hook into strmatch and check for a specific pattern being used to see if we're /clicking.
+-- it's the only sensible place to do this, really!
+-- feel free to remove this section if you don't need it :P
+
+local BTN_MATCH_PATTERN = "([^%s]+)%s+([^%s]+)%s*(.*)"
+
+local function findbtn(action, pattern)
+	if InCombatLockdown() then
+		return
+	end
+
+	if pattern == BTN_MATCH_PATTERN then
+		-- we're calling match here again, but it's not actually the SAME function we hooked into
+		-- so no need to worry about infinite recursion
+		name = action:match(BTN_MATCH_PATTERN) or action
+
+		local b = createbutton(name)
+	-- print(b and ("button found: "..name) or ("no button found: "..name))
+	end
+end
+
+hooksecurefunc("strmatch", findbtn)
+
+--------------------------
+--------------------------
+
+-- To preload buttons:
+
+UIParentLoadAddOn("Blizzard_PVPUI") -- load pvpui so the buttons exist in the first place
+
+createbuttons{
+	"ConquestFrame.Arena2v2",
+	"ConquestFrame.Arena3v3",
+	"ConquestFrame.RatedBG"
+}
