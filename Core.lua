@@ -51,6 +51,11 @@ local SoloqueueLDB_Menu = {
 		func = function() Soloqueue:ResetState(); end,
 	},
 	{
+		text = "Test",
+		notCheckable = true,
+		func = function() Soloqueue:Test(); end,
+	},
+	{
 		text = "",
 		notClickable = true,
 	},
@@ -173,6 +178,7 @@ function Soloqueue:OnInitialize()
 
 	-- Addon comms
 	eventFrame:RegisterEvent("CHAT_MSG_WHISPER");
+	self.hid = 0;
 
 	-- Default DPS role.
 	SetPVPRoles(false, false, true)
@@ -192,6 +198,7 @@ function Soloqueue:OnInitialize()
 
 	-- Applying to groups
 	self.leaders = {};
+	self.leadersTID = {};
 	self.pendingLeader = nil
 
 	-- Looking for players
@@ -271,8 +278,9 @@ function Soloqueue:StateMachine()
 	end
 end
 
-function Soloqueue:SendChatMessage(target, message)
-		SendChatMessage("#SQ:" .. message, "WHISPER", nil, target)
+function Soloqueue:SendChatMessage(target, tid, message)
+	-- Switch perspectives. Host ID becomes TID in message and vice versa
+	SendChatMessage("#SQ#MSG:" .. message .. "#HID:" .. tid .. "#TID:" .. self.hid, "WHISPER", nil, target)
 end
 
 function Soloqueue:RemoveInvitee(player)
@@ -312,29 +320,57 @@ function Soloqueue:AcceptInviteTimeout(name)
 end
 
 function Soloqueue:ChatMsgEventHandler(string, sender)
-	local msg = string.match(string, "#SQ:(%d+)");
+
+	-- Is this a Soloqueue message?
+	local prefix = string.match(string, "#SQ");
+	if (prefix == nil) then
+		return
+	end
+
+	-- Validate host ID mateches ours
+	local hid = string.match(string, "#HID:(%d+)");
+	if (hid == nil) then
+		return
+	end
+	hid = tonumber(hid);
+	if (hid ~= self.hid) then
+		return
+	end
+
+	-- Get the target ID for responce
+	local tid = string.match(string, "#TID:(%d+)");
+	if (tid == nil) then
+		return
+	end
+	tid = tonumber(tid);
+
+	-- Finally get the message
+	local msg = string.match(string, "#MSG:(%d+)");
+	if (msg == nil) then
+		return
+	end
 	msg = tonumber(msg);
 
 	if msg == MSG_REQUEST_HANDSHAKE then
 		local freeHandshakes = (playersToInvite - self.pendingHandshakes);
 		if (freeHandshakes > 0) then
 			table.insert(self.invitees, sender);
-			self:SendChatMessage(sender, MSG_HANDSHAKE);
+			self:SendChatMessage(sender, tid, MSG_HANDSHAKE);
 			C_Timer.After(2, function () Soloqueue:RemoveInvitee(sender) end)
 			self.pendingHandshakes = self.pendingHandshakes + 1;
 		else
-			self:SendChatMessage(sender, MSG_DECLINE);
+			self:SendChatMessage(sender, tid, MSG_DECLINE);
 		end
 	elseif msg == MSG_HANDSHAKE then
 		if (state == STATE_WAITING_HANDSHAKE) then
 			self.pendingLeader = sender;
 			self.leaders = {};
 			eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
-			self:SendChatMessage(sender, MSG_ACCEPT_HANDSHAKE);
+			self:SendChatMessage(sender, tid, MSG_ACCEPT_HANDSHAKE);
 			C_Timer.After(2, function () Soloqueue:InviteTimeout(sender) end)
 			state = STATE_WAITING_INVITE;
 		else
-			self:SendChatMessage(sender, MSG_DECLINE);
+			self:SendChatMessage(sender, tid, MSG_DECLINE);
 		end
 	elseif msg == MSG_ACCEPT_HANDSHAKE then
 		eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
@@ -373,11 +409,15 @@ function Soloqueue:LookForGroupCallback()
 		for _,groupID in pairs(results) do
 			local _,_,_,description,_,_,_,_,_,_,_,_,leader,_ = C_LFGList.GetSearchResultInfo(groupID)
 			if description then
+				local prefix = string.match(description, "Soloqueue");
 				local low, high = string.match(description, "#L:(%d+) #H:(%d+)");
+				local tid = string.match(description, "#TID:(%d+)");
 				low = tonumber(low);
 				high = tonumber(high);
+				tid = tonumber(tid);
 				if ((self.CR >= low) and (self.CR < high)) then
 					table.insert(self.leaders, leader);
+					table.insert(self.leadersTID, tid);
 				end
 			end
 		end
@@ -400,11 +440,12 @@ function Soloqueue:LookForGroupCallback()
 end
 
 function Soloqueue:ApplyToGroups()
-	eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
-	for _,leader in pairs(self.leaders) do
-		self:SendChatMessage(leader, MSG_REQUEST_HANDSHAKE);
-	end
 	state = STATE_WAITING_HANDSHAKE;
+	self.hid = fastrandom(0x7fffffff);
+	eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
+	for i,leader in pairs(self.leaders) do
+		self:SendChatMessage(leader, self.leadersTID[i], MSG_REQUEST_HANDSHAKE);
+	end
 	C_Timer.After(2, function () Soloqueue:HandshakeTimeout() end)
 end
 
@@ -432,9 +473,10 @@ function Soloqueue:UICallback(sender)
 end
 
 function Soloqueue:CreateGroup()
-	self:Print ("No groups found. Creating group for ratings " .. self.CRLower .. ":" .. self.CRUpper);
-	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #L:" .. self.CRLower .. " #H:" .. self.CRUpper, false, true); -- arena 7
 	state = STATE_WAIT_TEAMMATES
+	self:Print ("No groups found. Creating group for ratings " .. self.CRLower .. ":" .. self.CRUpper);
+	self.hid = fastrandom(0x7fffffff);
+	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #TID:" .. self.hid .. " #L:" .. self.CRLower .. " #H:" .. self.CRUpper, false, true); -- arena 7
 	self.pendingHandshakes = 0;
 end
 
@@ -598,3 +640,6 @@ createbuttons{
 	"ConquestFrame.Arena3v3",
 	"ConquestFrame.RatedBG"
 }
+
+function Soloqueue:Test()
+end
