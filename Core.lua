@@ -11,7 +11,7 @@ local MSG_REQUEST_HANDSHAKE, MSG_HANDSHAKE, MSG_ACCEPT_HANDSHAKE, MSG_DECLINE = 
 
 -- Sometimes the ratings are not available first time around
 local attempts = 0
-local MAX_ATTEMPTS = 3
+local MAX_ATTEMPTS = 2
 
 -- Bracket stuff
 local BRACKET_2V2, BRACKET_3V3, BRACKET_RATEDBG = 1, 2, 4;
@@ -467,10 +467,24 @@ function Soloqueue:LookForGroupCallback()
 				local prefix = string.match(description, "Soloqueue");
 				local low, high = string.match(description, "#L:(%d+) #H:(%d+)");
 				local tid = string.match(description, "#TID:(%d+)");
+				local groupBracket = string.match(description, "#B:(%d+)");
+				local groupHealerReq, groupHasHealer;
+				if string.match(description, "#HEALREQ") then
+					groupHealerReq = true;
+				else
+					groupHealerReq = false;
+				end
+				if string.match(description, "#HASHEALER") then
+					groupHasHealer = true;
+				else
+					groupHasHealer = false;
+				end
 				low = tonumber(low);
 				high = tonumber(high);
 				tid = tonumber(tid);
-				if ((self.CR >= low) and (self.CR < high)) then
+				groupBracket = tonumber(groupBracket);
+				-- Healer always meet healer requirements!
+				if ((self.CR >= low) and (self.CR < high)) and (groupBracket == bracket) and ((groupHealerReq == healerRequired) or (self.role == "HEALER") or groupHasHealer) then
 					table.insert(self.leaders, leader);
 					table.insert(self.leadersTID, tid);
 				end
@@ -550,9 +564,20 @@ end
 
 function Soloqueue:CreateGroup()
 	state = STATE_WAIT_TEAMMATES
+	local healerString
+	-- If current role is healer, then healer req is removed. Unless it's ratedBG...
+	if (healerRequired) then
+		healerString = "#HEALREQ";
+	else
+		healerString = "";
+	end
+	if ((self.role == "HEALER") and (bracket ~= BRACKET_RATEDBG)) then
+		healerString = healerString .. "#HASHEALER"
+	end
 	self:Print ("No groups found. Creating group for ratings " .. self.CRLower .. ":" .. self.CRUpper);
+
 	self.hid = fastrandom(0x7fffffff);
-	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #TID:" .. self.hid .. " #L:" .. self.CRLower .. " #H:" .. self.CRUpper, false, true); -- arena 7
+	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #TID:" .. self.hid .. " #L:" .. self.CRLower .. " #H:" .. self.CRUpper .. "#B:" .. bracket .. healerString, false, true); -- arena 7
 	self.pendingHandshakes = 0;
 end
 
@@ -601,6 +626,7 @@ end
 function Soloqueue:ResetState()
 	self.CallbackPending = false;
 	C_LFGList.RemoveListing();
+	LeaveParty();
 	state = STATE_GET_RATING;
 	self:Print("Reset state")
 end
