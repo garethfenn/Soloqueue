@@ -13,8 +13,10 @@ local MSG_REQUEST_HANDSHAKE, MSG_HANDSHAKE, MSG_ACCEPT_HANDSHAKE, MSG_DECLINE = 
 local attempts = 0
 local MAX_ATTEMPTS = 3
 
--- 5v5 isn't used anymore...
+-- Bracket stuff
+local BRACKET_2V2, BRACKET_3V3, BRACKET_RATEDBG = 1, 2, 4;
 local BRACKETS = { "2v2", "3v3", "5v5", "RBG" }
+local bracketNumPlayers = {2, 3, 5, 10};
 
 local CR_MINIMUM = 1200;
 local CR_WINDOW_INCREMENT = 50;
@@ -35,10 +37,16 @@ local SoloqueueLDB_Menu = {
 		hasArrow = true,
 		notCheckable = true,
 		menuList = {
-			{ text = "2v2", notCheckable = false, checked = function() return (playersToInvite == 1) end, func = function() playersToInvite = 1; bracket = 1; end },
-			{ text = "3v3", notCheckable = false, checked = function() return (playersToInvite == 2) end, func = function() playersToInvite = 2; bracket = 2; end },
-			{ text = "RatedBG", notCheckable = false, checked = function() return (playersToInvite == 9) end, func = function() playersToInvite = 9; bracket = 4 end },
+			{ text = "2v2", notCheckable = false, checked = function() return (bracket == BRACKET_2V2) end, func = function() bracket = BRACKET_2V2; end },
+			{ text = "3v3", notCheckable = false, checked = function() return (bracket == BRACKET_3V3) end, func = function() bracket = BRACKET_3V3; end },
+			{ text = "RatedBG", notCheckable = false, checked = function() return (bracket == BRACKET_RATEDBG) end, func = function() bracket = BRACKET_RATEDBG end },
 		}
+	},
+	{
+		text = "Healer required",
+		notCheckable = false,
+		checked = function() return healerRequired end,
+		func = function() healerRequired = not healerRequired end,
 	},
 	{
 		text = "Create macro",
@@ -116,7 +124,7 @@ function Soloqueue:CallRatingCallback(player, ratings)
 end
 
 local function eventHandler(self, event, ...)
-	--print("got event:" .. event)
+	print("got event:" .. event)
 	if event == "ADDON_LOADED" then
 		eventFrame:UnregisterEvent("ADDON_LOADED");
 		Soloqueue:WelcomeMessage();
@@ -191,6 +199,7 @@ function Soloqueue:OnInitialize()
 
 	-- Init context
 	self.CallbackPending = false;
+	self.role = nil;
 	self.CR = 0;
 
 	-- Stack of players to get ratings from
@@ -200,19 +209,22 @@ function Soloqueue:OnInitialize()
 	self.leaders = {};
 	self.leadersTID = {};
 	self.pendingLeader = nil
+	self.retryAttempts = 0;
 
 	-- Looking for players
 	self.CRUpper = 0;
 	self.CRLower = 0;
-	self.pendingHandshakes = 0;
-	self.invitees = {};
+	self.inviteesHealer = {};
+	self.inviteesHealerFree = 0;
+	self.inviteesDamager = {};
+	self.inviteesDamagerFree = 0;
 end
 
 function Soloqueue:WelcomeMessage()
 	if DisplayedWelcomeMessage == nil then
 		DisplayedWelcomeMessage = true;
-		playersToInvite = 2;
 		bracket = 2;
+		healerRequired = false;
 		self:Print("Welcome to Soloqueue. Create your macro using the minimap button.")
 	end
 end
@@ -258,7 +270,7 @@ end
 
 function Soloqueue:StateMachine()
 
-	--print ("Current state:" .. state)
+	print ("Current state:" .. state)
 
 	if (self.CallbackPending == true) then
 		--print ("Callback pending ...")
@@ -280,16 +292,26 @@ end
 
 function Soloqueue:SendChatMessage(target, tid, message)
 	-- Switch perspectives. Host ID becomes TID in message and vice versa
-	SendChatMessage("#SQ#MSG:" .. message .. "#HID:" .. tid .. "#TID:" .. self.hid, "WHISPER", nil, target)
+	SendChatMessage("#SQ#MSG:" .. message .. "#ROLE:" .. self.role .. "#HID:" .. tid .. "#TID:" .. self.hid, "WHISPER", nil, target)
 end
 
-function Soloqueue:RemoveInvitee(player)
+function Soloqueue:RemoveInvitee(player, role)
 	if not UnitInParty(player) then
-		for slot, invitee in pairs(self.invitees) do
-			if invitee == player then
-				self.invitees[slot] = nil;
-				self.pendingHandshakes = self.pendingHandshakes + 1;
-				break;
+		if (role == "HEALER") then
+			for slot, invitee in pairs(self.inviteesHealer) do
+				if invitee == player then
+					self.inviteesHealer[slot] = nil;
+					self.inviteesHealerFree = self.inviteesHealerFree + 1;
+					break;
+				end
+			end
+		else -- DAMAGER
+			for slot, invitee in pairs(self.inviteesDamager) do
+				if invitee == player then
+					self.inviteesDamager[slot] = nil;
+					self.inviteesDamagerFree = self.inviteesDamagerFree + 1;
+					break;
+				end
 			end
 		end
 	end
@@ -297,8 +319,10 @@ end
 
 function Soloqueue:HandshakeTimeout()
 	if (state == STATE_WAITING_HANDSHAKE) then
+		self.retryAttempts = self.retryAttempts + 1;
 		self:Print ("No handshakes... Looking again for groups. Keep clicking button...")
 		self.leaders = {};
+		self.leadersTID = {};
 		state = STATE_LOOK_FOR_GROUP;
 	end
 end
@@ -326,24 +350,30 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 	if (prefix == nil) then
 		return
 	end
-
+	print (prefix)
 	-- Validate host ID mateches ours
 	local hid = string.match(string, "#HID:(%d+)");
 	if (hid == nil) then
 		return
 	end
 	hid = tonumber(hid);
+	print (hid)
 	if (hid ~= self.hid) then
 		return
 	end
-
 	-- Get the target ID for responce
 	local tid = string.match(string, "#TID:(%d+)");
 	if (tid == nil) then
 		return
 	end
 	tid = tonumber(tid);
-
+	print (tid)
+	-- Get their reported role
+	local senderRole = string.match(string, "#ROLE:(%a+)");
+	if (senderRole == nil) then
+		return
+	end
+	print (senderRole)
 	-- Finally get the message
 	local msg = string.match(string, "#MSG:(%d+)");
 	if (msg == nil) then
@@ -352,19 +382,38 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 	msg = tonumber(msg);
 
 	if msg == MSG_REQUEST_HANDSHAKE then
-		local freeHandshakes = (playersToInvite - self.pendingHandshakes);
-		if (freeHandshakes > 0) then
-			table.insert(self.invitees, sender);
-			self:SendChatMessage(sender, tid, MSG_HANDSHAKE);
-			C_Timer.After(2, function () Soloqueue:RemoveInvitee(sender) end)
-			self.pendingHandshakes = self.pendingHandshakes + 1;
-		else
-			self:SendChatMessage(sender, tid, MSG_DECLINE);
+		if senderRole == "HEALER" then
+			if self.inviteesHealerFree ~= 0 then
+				table.insert(self.inviteesHealer, sender);
+				self:SendChatMessage(sender, tid, MSG_HANDSHAKE);
+				C_Timer.After(2, function () Soloqueue:RemoveInvitee(sender, senderRole) end)
+				self.inviteesHealerFree = self.inviteesHealerFree - 1;
+			else
+				self:SendChatMessage(sender, tid, MSG_DECLINE);
+			end
+		else -- DAMAGER
+			if self.inviteesDamagerFree ~= 0 then
+				table.insert(self.inviteesDamager, sender);
+				self:SendChatMessage(sender, tid, MSG_HANDSHAKE);
+				C_Timer.After(2, function () Soloqueue:RemoveInvitee(sender, senderRole) end)
+				self.inviteesDamagerFree = self.inviteesDamagerFree - 1;
+			else
+				if healerRequired == false and self.inviteesHealerFree ~= 0 then
+					-- DPS taking a healer's spot
+					table.insert(self.inviteesHealer, sender);
+					self:SendChatMessage(sender, tid, MSG_HANDSHAKE);
+					C_Timer.After(2, function () Soloqueue:RemoveInvitee(sender, senderRole) end)
+					self.inviteesHealerFree = self.inviteesHealerFree - 1;
+				else
+					self:SendChatMessage(sender, tid, MSG_DECLINE);
+				end
+			end
 		end
 	elseif msg == MSG_HANDSHAKE then
 		if (state == STATE_WAITING_HANDSHAKE) then
 			self.pendingLeader = sender;
 			self.leaders = {};
+			self.leadersTID = {};
 			eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
 			self:SendChatMessage(sender, tid, MSG_ACCEPT_HANDSHAKE);
 			C_Timer.After(2, function () Soloqueue:InviteTimeout(sender) end)
@@ -379,12 +428,17 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 	elseif msg == MSG_DECLINE then
 		print ("Declined!");
 		if (state == STATE_WAIT_TEAMMATES) then
-			Soloqueue:RemoveInvitee(sender);
+			Soloqueue:RemoveInvitee(sender, senderRole);
 		end
 	end
 end
 
 function Soloqueue:GetPlayerRating()
+	self.role = GetSpecializationRole(GetSpecialization());
+	if (self.role ~= "HEALER") and (self.role ~= "DAMAGER") then
+		self:Print("Invalid talent spec! Must be damage of healer.")
+		return;
+	end
 	self:PutPlayer("player");
 	self.CallbackPending = true;
 	self:InitRatingRequest();
@@ -392,6 +446,7 @@ end
 
 function Soloqueue:GetPlayerRatingCallback(ratings)
 	self.CR = ratings[bracket];
+	self.retryAttempts = 0;
 	state = STATE_LOOK_FOR_GROUP;
 	self.CallbackPending = false;
 end
@@ -423,7 +478,7 @@ function Soloqueue:LookForGroupCallback()
 		end
 	end
 
-	if (table.getn(self.leaders) == 0) then
+	if (table.getn(self.leaders) == 0) or self.retryAttempts == MAX_ATTEMPTS then
 		state = STATE_CREATE_GROUP;
 		if (self.CR >= CR_MINIMUM) then
 			self.CRUpper = ratings[bracket] + CR_WINDOW_INCREMENT;
@@ -431,6 +486,26 @@ function Soloqueue:LookForGroupCallback()
 		else
 			self.CRUpper = CR_MINIMUM;
 			self.CRLower = 0;
+		end
+
+		self.inviteesHealer = {};
+		self.inviteesDamager = {};
+
+		if (bracket == BRACKET_2V2) then
+			self.inviteesHealerFree = 1;
+			self.inviteesDamagerFree = 1;
+		elseif (bracket == BRACKET_3V3) then
+			self.inviteesHealerFree = 1;
+			self.inviteesDamagerFree = 2;
+		elseif (bracket == BRACKET_RATEDBG) then
+			self.inviteesHealerFree = 2;
+			self.inviteesDamagerFree = 8;
+		end
+
+		if (self.role == "HEALER") then
+			self.inviteesHealerFree = self.inviteesHealerFree - 1;
+		else
+			self.inviteesDamagerFree = self.inviteesDamagerFree - 1;
 		end
 	else
 		state = STATE_APPLY_TO_GROUPS;
@@ -456,6 +531,7 @@ function Soloqueue:ApplyToGroupsCallback(sender)
 		eventFrame:RegisterEvent("GROUP_JOINED")
 		self.groupIDs = {};
 		self.leaders = {};
+		self.leadersTID = {};
 	end
 end
 
@@ -483,7 +559,7 @@ end
 function Soloqueue:RosterUpdateEventHandler()
 	if (state == STATE_WAIT_TEAMMATES) then
 		local numPlayers = GetNumGroupMembers();
-		if (numPlayers == (playersToInvite + 1)) then -- including ourselves
+		if (numPlayers == bracketNumPlayers[bracket]) then
 			eventFrame:UnregisterEvent("GROUP_ROSTER_UPDATE");
 			state = STATE_DELIST_GROUP;
 		end
@@ -500,20 +576,6 @@ end
 function Soloqueue:RoleCheckEventHandler()
 	CompleteLFGRoleCheck(true);
 	state = STATE_CHECK_TEAMMATES;
-end
-
-function Soloqueue:ReduceRequirements()
-	if (self.CRLower >= CR_WINDOW_INCREMENT) then
-		self.CRLower = self.CRLower - CR_WINDOW_INCREMENT;
-	elseif (self.CRLower > 0) then
-		self.CRLower = 0;
-	else
-		self:Print ("Already at lowest rating. Sorry!");
-		return;
-	end
-
-	self:Print ("Reducing rating requirement.");
-	C_LFGList.UpdateListing(7, "Soloqueue", 0, 0, "", "Do not join. #L:".. self.CRLower .. " #H:" .. self.CRUpper, false, 0);
 end
 
 function Soloqueue:CreateMacro()
@@ -642,4 +704,6 @@ createbuttons{
 }
 
 function Soloqueue:Test()
+	role = GetSpecializationRole(GetSpecialization())
+	print (role)
 end

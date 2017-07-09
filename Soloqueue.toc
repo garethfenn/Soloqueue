@@ -3,7 +3,7 @@
 ## Title: Soloqueue
 ## Author: Gareth Fenn
 ## Notes: Solo queue
-## SavedVariables: DisplayedWelcomeMessage SoloqueueDB playersToInvite bracket
+## SavedVariables: DisplayedWelcomeMessage SoloqueueDB playersToInvite bracket healerRequired
 
 embeds.xml
 Core.lua
