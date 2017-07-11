@@ -3,7 +3,7 @@ local eventFrame = nil
 
 -- States
 local STATE_GET_RATING, STATE_LOOK_FOR_GROUP, STATE_APPLY_TO_GROUPS, STATE_WAITING_HANDSHAKE, STATE_WAITING_INVITE,
-      STATE_CREATE_GROUP, STATE_WAIT_TEAMMATES, STATE_DELIST_GROUP, STATE_ROLE_CHECK, STATE_CHECK_TEAMMATES = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9;
+      STATE_CREATE_GROUP, STATE_WAIT_TEAMMATES, STATE_DELIST_GROUP, STATE_ROLE_CHECK, STATE_WAIT_BG_ENTRY, STATE_CHECK_TEAMMATES = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10;
 local state = STATE_GET_RATING;
 
 -- Messages
@@ -12,6 +12,7 @@ local MSG_REQUEST_HANDSHAKE, MSG_HANDSHAKE, MSG_ACCEPT_HANDSHAKE, MSG_DECLINE = 
 -- Sometimes the ratings are not available first time around
 local attempts = 0
 local MAX_ATTEMPTS = 2
+local TIMEOUT_SEC = 5
 
 -- Bracket stuff
 local BRACKET_2V2, BRACKET_3V3, BRACKET_RATEDBG = 1, 2, 4;
@@ -107,6 +108,15 @@ function Soloqueue:PopPlayer()
 	--print ("Pop " .. player);
 end
 
+function Soloqueue:StripOwnRealm(sender)
+	local name, realm = sender:match("^([^%-]+)%-(.+)$")
+	if realm == GetRealmName() then
+		return name;
+	else
+		return sender;
+	end
+end
+
 function Soloqueue:PrintRatings(player, ratings)
 	local name = UnitName(player);
 	print(name .. " ratings:");
@@ -150,6 +160,9 @@ local function eventHandler(self, event, ...)
 	elseif event == "LFG_ROLE_CHECK_SHOW" then
 		eventFrame:UnregisterEvent("LFG_ROLE_CHECK_SHOW");
 		Soloqueue:RoleCheckEventHandler();
+	elseif event == "PLAYER_ENTERING_BATTLEGROUND" then
+		eventFrame:UnregisterEvent("PLAYER_ENTERING_BATTLEGROUND");
+		Soloqueue:RoleCheckEventHandler();
 	else
 		print ("Unexpected event: " .. event);
 	end
@@ -173,6 +186,7 @@ function Soloqueue:OnInitialize()
 
 	-- Commands
 	self:RegisterChatCommand("soloqueue", "StateMachine");
+	self:RegisterChatCommand("soloqueue-reset", "ResetState");
 
 	-- Minimap
 	icon:Register("Soloqueue", SoloqueueLDB, self.db.profile.minimap);
@@ -206,18 +220,19 @@ function Soloqueue:OnInitialize()
 	self.player_stack = {};
 
 	-- Applying to groups
-	self.leaders = {};
-	self.leadersTID = {};
+	self.groups = {};
 	self.pendingLeader = nil
 	self.retryAttempts = 0;
 
 	-- Looking for players
-	self.CRUpper = 0;
-	self.CRLower = 0;
 	self.inviteesHealer = {};
 	self.inviteesHealerFree = 0;
 	self.inviteesDamager = {};
 	self.inviteesDamagerFree = 0;
+
+	-- Information about the group
+	self.CRUpper = 0;
+	self.CRLower = 0;
 end
 
 function Soloqueue:WelcomeMessage()
@@ -257,6 +272,8 @@ function Soloqueue:ParseArenaRatings()
 
 	if (self:CurPlayer()) then
 		self:InitRatingRequest();
+	else
+		self.CallbackPending = false;
 	end
 end
 
@@ -287,6 +304,8 @@ function Soloqueue:StateMachine()
 		self:CreateGroup();
 	elseif state == STATE_DELIST_GROUP then
 		self:DelistGroup();
+	elseif state == STATE_CHECK_TEAMMATES then
+		self:CheckTeammates();
 	end
 end
 
@@ -321,8 +340,7 @@ function Soloqueue:HandshakeTimeout()
 	if (state == STATE_WAITING_HANDSHAKE) then
 		self.retryAttempts = self.retryAttempts + 1;
 		self:Print ("No handshakes... Looking again for groups. Keep clicking button...")
-		self.leaders = {};
-		self.leadersTID = {};
+		self.groups = {};
 		state = STATE_LOOK_FOR_GROUP;
 	end
 end
@@ -337,7 +355,7 @@ end
 
 function Soloqueue:AcceptInviteTimeout(name)
 	if not UnitInParty(name) then
-	self:Print (name .. " didn't accept timeout in time... restarting group. Keep clicking button...")
+	self:Print (name .. " didn't accept invite in time... restarting group. Keep clicking button...")
 	LeaveParty();
 	self.pendingHandshakes = 0;
 	end
@@ -386,7 +404,7 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 			if self.inviteesHealerFree ~= 0 then
 				table.insert(self.inviteesHealer, sender);
 				self:SendChatMessage(sender, tid, MSG_HANDSHAKE);
-				C_Timer.After(2, function () Soloqueue:RemoveInvitee(sender, senderRole) end)
+				C_Timer.After(TIMEOUT_SEC, function () Soloqueue:RemoveInvitee(sender, senderRole) end)
 				self.inviteesHealerFree = self.inviteesHealerFree - 1;
 			else
 				self:SendChatMessage(sender, tid, MSG_DECLINE);
@@ -395,14 +413,14 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 			if self.inviteesDamagerFree ~= 0 then
 				table.insert(self.inviteesDamager, sender);
 				self:SendChatMessage(sender, tid, MSG_HANDSHAKE);
-				C_Timer.After(2, function () Soloqueue:RemoveInvitee(sender, senderRole) end)
+				C_Timer.After(TIMEOUT_SEC, function () Soloqueue:RemoveInvitee(sender, senderRole) end)
 				self.inviteesDamagerFree = self.inviteesDamagerFree - 1;
 			else
 				if healerRequired == false and self.inviteesHealerFree ~= 0 then
 					-- DPS taking a healer's spot
 					table.insert(self.inviteesHealer, sender);
 					self:SendChatMessage(sender, tid, MSG_HANDSHAKE);
-					C_Timer.After(2, function () Soloqueue:RemoveInvitee(sender, senderRole) end)
+					C_Timer.After(TIMEOUT_SEC, function () Soloqueue:RemoveInvitee(sender, senderRole) end)
 					self.inviteesHealerFree = self.inviteesHealerFree - 1;
 				else
 					self:SendChatMessage(sender, tid, MSG_DECLINE);
@@ -411,20 +429,30 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 		end
 	elseif msg == MSG_HANDSHAKE then
 		if (state == STATE_WAITING_HANDSHAKE) then
-			self.pendingLeader = sender;
-			self.leaders = {};
-			self.leadersTID = {};
+			print ("handshake received from " .. sender)
+			local name = self:StripOwnRealm(sender);
+			self.pendingLeader = name;
+			for _, group in pairs(self.groups) do
+				print (group.leader .. " " .. name)
+				if (group.leader == name) then
+					self.CRUpper = group.high;
+					self.CRLower = group.low;
+					break;
+				end
+			end
+			self.groups = {};
 			eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
-			self:SendChatMessage(sender, tid, MSG_ACCEPT_HANDSHAKE);
-			C_Timer.After(2, function () Soloqueue:InviteTimeout(sender) end)
 			state = STATE_WAITING_INVITE;
+			self:SendChatMessage(sender, tid, MSG_ACCEPT_HANDSHAKE);
+			C_Timer.After(TIMEOUT_SEC, function () Soloqueue:InviteTimeout(sender) end)
 		else
 			self:SendChatMessage(sender, tid, MSG_DECLINE);
 		end
 	elseif msg == MSG_ACCEPT_HANDSHAKE then
+		local name = self:StripOwnRealm(sender);
 		eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
-		InviteUnit(sender)
-		C_Timer.After(2, function () Soloqueue:AcceptInviteTimeout(sender) end)
+		InviteUnit(name)
+		C_Timer.After(TIMEOUT_SEC, function () Soloqueue:AcceptInviteTimeout(name) end)
 	elseif msg == MSG_DECLINE then
 		print ("Declined!");
 		if (state == STATE_WAIT_TEAMMATES) then
@@ -448,7 +476,6 @@ function Soloqueue:GetPlayerRatingCallback(ratings)
 	self.CR = ratings[bracket];
 	self.retryAttempts = 0;
 	state = STATE_LOOK_FOR_GROUP;
-	self.CallbackPending = false;
 end
 
 function Soloqueue:LookForGroup()
@@ -485,14 +512,14 @@ function Soloqueue:LookForGroupCallback()
 				groupBracket = tonumber(groupBracket);
 				-- Healer always meet healer requirements!
 				if ((self.CR >= low) and (self.CR < high)) and (groupBracket == bracket) and ((groupHealerReq == healerRequired) or (self.role == "HEALER") or groupHasHealer) then
-					table.insert(self.leaders, leader);
-					table.insert(self.leadersTID, tid);
+					local group = { leader = leader, tid = tid, low = low, high = high };
+					table.insert(self.groups, group);
 				end
 			end
 		end
 	end
 
-	if (table.getn(self.leaders) == 0) or self.retryAttempts == MAX_ATTEMPTS then
+	if (table.getn(self.groups) == 0) or self.retryAttempts == MAX_ATTEMPTS then
 		state = STATE_CREATE_GROUP;
 		if (self.CR >= CR_MINIMUM) then
 			self.CRUpper = ratings[bracket] + CR_WINDOW_INCREMENT;
@@ -532,20 +559,19 @@ function Soloqueue:ApplyToGroups()
 	state = STATE_WAITING_HANDSHAKE;
 	self.hid = fastrandom(0x7fffffff);
 	eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
-	for i,leader in pairs(self.leaders) do
-		self:SendChatMessage(leader, self.leadersTID[i], MSG_REQUEST_HANDSHAKE);
+	for _,group in pairs(self.groups) do
+		self:SendChatMessage(group.leader, group.tid, MSG_REQUEST_HANDSHAKE);
 	end
-	C_Timer.After(2, function () Soloqueue:HandshakeTimeout() end)
+	C_Timer.After(TIMEOUT_SEC, function () Soloqueue:HandshakeTimeout() end)
 end
 
 function Soloqueue:ApplyToGroupsCallback(sender)
+	print ("invite from" .. sender)
 	if (sender == self.pendingLeader) then
 		AcceptGroup()
 		eventFrame:UnregisterEvent("PARTY_INVITE_REQUEST");
 		eventFrame:RegisterEvent("GROUP_JOINED")
-		self.groupIDs = {};
-		self.leaders = {};
-		self.leadersTID = {};
+		self.groups = {};
 	end
 end
 
@@ -586,20 +612,26 @@ function Soloqueue:RosterUpdateEventHandler()
 		local numPlayers = GetNumGroupMembers();
 		if (numPlayers == bracketNumPlayers[bracket]) then
 			eventFrame:UnregisterEvent("GROUP_ROSTER_UPDATE");
+			self:Print("Full group. Keep pressing button...")
 			state = STATE_DELIST_GROUP;
 		end
 	end
 end
 
 function Soloqueue:DelistGroup()
-	self:Print("Full group. Press button to queue arena!")
 	C_LFGList.RemoveListing();
-	eventFrame:RegisterEvent("LFG_ROLE_CHECK_SHOW");
-	state = STATE_CHECK_TEAMMATES;
+	eventFrame:RegisterEvent("PLAYER_ENTERING_BATTLEGROUND");
+	state = STATE_WAIT_BG_ENTRY;
 end
 
 function Soloqueue:RoleCheckEventHandler()
 	CompleteLFGRoleCheck(true);
+	eventFrame:RegisterEvent("PLAYER_ENTERING_BATTLEGROUND");
+	state = STATE_WAIT_BG_ENTRY;
+end
+
+function Soloqueue:BattlegroundEventHandler()
+	self:Print("Entered arena. Press button to check teammates ratings are lefit.")
 	state = STATE_CHECK_TEAMMATES;
 end
 
@@ -632,8 +664,6 @@ function Soloqueue:ResetState()
 end
 
 function Soloqueue:CheckTeammates()
-	self:Print("Checking teammates ratings are correct...");
-
 	local selfName = UnitName('player');
 	if IsInRaid() then
 		for i = 1, 10 do
@@ -657,8 +687,11 @@ function Soloqueue:CheckTeammates()
 end
 
 function Soloqueue:CheckTeamMatesCallback(player, ratings)
-	self:PrintRatings(player, targetCurrentRatings);
-	self.CallbackPending = false;
+	if (ratings[bracket] < self.CRLower or ratings[bracket] >= self.CRUpper) then
+		local cheater = UnitName(player);
+		self:PrintRatings(player, ratings);
+		self.Print("Cheater caught! Do you want to blacklist " .. cheater .. "?")
+	end
 end
 
 ----------------------------------------------------------
@@ -730,6 +763,4 @@ createbuttons{
 }
 
 function Soloqueue:Test()
-	role = GetSpecializationRole(GetSpecialization())
-	print (role)
 end
