@@ -18,6 +18,8 @@ local TIMEOUT_SEC = 5
 local BRACKET_2V2, BRACKET_3V3, BRACKET_RATEDBG = 1, 2, 4;
 local BRACKETS = { "2v2", "3v3", "5v5", "RBG" }
 local bracketNumPlayers = {2, 3, 5, 10};
+local CreateGroupID = {6, 7, 0, 19}
+local FindGroupID = {4, 4, 0, 9}
 
 local CR_MINIMUM = 1200;
 local CR_WINDOW_INCREMENT = 50;
@@ -38,9 +40,9 @@ local SoloqueueLDB_Menu = {
 		hasArrow = true,
 		notCheckable = true,
 		menuList = {
-			{ text = "2v2", notCheckable = false, checked = function() return (bracket == BRACKET_2V2) end, func = function() bracket = BRACKET_2V2; end },
-			{ text = "3v3", notCheckable = false, checked = function() return (bracket == BRACKET_3V3) end, func = function() bracket = BRACKET_3V3; end },
-			{ text = "RatedBG", notCheckable = false, checked = function() return (bracket == BRACKET_RATEDBG) end, func = function() bracket = BRACKET_RATEDBG end },
+			{ text = "2v2", notCheckable = false, checked = function() return (bracket == BRACKET_2V2) end, func = function() bracket = BRACKET_2V2; Soloqueue:ResetState(); end },
+			{ text = "3v3", notCheckable = false, checked = function() return (bracket == BRACKET_3V3) end, func = function() bracket = BRACKET_3V3; Soloqueue:ResetState(); end },
+			{ text = "RatedBG", notCheckable = false, checked = function() return (bracket == BRACKET_RATEDBG) end, func = function() bracket = BRACKET_RATEDBG; Soloqueue:ResetState(); end },
 		}
 	},
 	{
@@ -118,10 +120,15 @@ function Soloqueue:StripOwnRealm(sender)
 end
 
 function Soloqueue:PrintRatings(player, ratings)
-	local name = UnitName(player);
-	print(name .. " ratings:");
+	local name, realm = UnitName(player);
+	if (realm == nil) then
+		fullname = name;
+	else
+		fullname = name .. "-" .. realm;
+	end
+	self:Print(fullname .. " ratings:");
 	for i, r in pairs(ratings) do
-		print (BRACKETS[i] .. " : " .. r)
+		self:Print (BRACKETS[i] .. " : " .. r)
 	end
 end
 
@@ -134,7 +141,7 @@ function Soloqueue:CallRatingCallback(player, ratings)
 end
 
 local function eventHandler(self, event, ...)
-	print("got event:" .. event)
+	print("got event: " .. event)
 	if event == "ADDON_LOADED" then
 		eventFrame:UnregisterEvent("ADDON_LOADED");
 		Soloqueue:WelcomeMessage();
@@ -168,9 +175,11 @@ local function eventHandler(self, event, ...)
 	end
 end
 
-local function hook_SetAction(a, b, c, d, e)
-	print(type(a))
+local function hook_dummy(a, b, c, d, e)
 	print(a)
+	print(b)
+	print(c)
+	print(d)
 end
 
 function Soloqueue:OnInitialize()
@@ -204,6 +213,8 @@ function Soloqueue:OnInitialize()
 
 	-- Default DPS role.
 	SetPVPRoles(false, false, true)
+
+	--hooksecurefunc(C_LFGList, "Search", hook_dummy);
 
 	hooksecurefunc(C_LFGList, "RemoveListing", function(self)
 		if (state == STATE_WAIT_TEAMMATES) then
@@ -240,6 +251,7 @@ function Soloqueue:WelcomeMessage()
 		DisplayedWelcomeMessage = true;
 		bracket = 2;
 		healerRequired = false;
+		blacklist = {};
 		self:Print("Welcome to Soloqueue. Create your macro using the minimap button.")
 	end
 end
@@ -287,7 +299,7 @@ end
 
 function Soloqueue:StateMachine()
 
-	print ("Current state:" .. state)
+	print ("Current state: " .. state)
 
 	if (self.CallbackPending == true) then
 		--print ("Callback pending ...")
@@ -302,8 +314,6 @@ function Soloqueue:StateMachine()
 		self:ApplyToGroups();
 	elseif state == STATE_CREATE_GROUP then
 		self:CreateGroup();
-	elseif state == STATE_DELIST_GROUP then
-		self:DelistGroup();
 	elseif state == STATE_CHECK_TEAMMATES then
 		self:CheckTeammates();
 	end
@@ -368,30 +378,37 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 	if (prefix == nil) then
 		return
 	end
-	print (prefix)
+
+	local name = self:StripOwnRealm(sender);
+	if (blacklist[name] == true) then
+		return
+	end
+
 	-- Validate host ID mateches ours
 	local hid = string.match(string, "#HID:(%d+)");
 	if (hid == nil) then
 		return
 	end
 	hid = tonumber(hid);
-	print (hid)
+
 	if (hid ~= self.hid) then
+		self:SendChatMessage(sender, tid, MSG_DECLINE);
 		return
 	end
+
 	-- Get the target ID for responce
 	local tid = string.match(string, "#TID:(%d+)");
 	if (tid == nil) then
 		return
 	end
 	tid = tonumber(tid);
-	print (tid)
+
 	-- Get their reported role
 	local senderRole = string.match(string, "#ROLE:(%a+)");
 	if (senderRole == nil) then
 		return
 	end
-	print (senderRole)
+
 	-- Finally get the message
 	local msg = string.match(string, "#MSG:(%d+)");
 	if (msg == nil) then
@@ -429,11 +446,8 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 		end
 	elseif msg == MSG_HANDSHAKE then
 		if (state == STATE_WAITING_HANDSHAKE) then
-			print ("handshake received from " .. sender)
-			local name = self:StripOwnRealm(sender);
 			self.pendingLeader = name;
 			for _, group in pairs(self.groups) do
-				print (group.leader .. " " .. name)
 				if (group.leader == name) then
 					self.CRUpper = group.high;
 					self.CRLower = group.low;
@@ -449,12 +463,10 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 			self:SendChatMessage(sender, tid, MSG_DECLINE);
 		end
 	elseif msg == MSG_ACCEPT_HANDSHAKE then
-		local name = self:StripOwnRealm(sender);
 		eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 		InviteUnit(name)
 		C_Timer.After(TIMEOUT_SEC, function () Soloqueue:AcceptInviteTimeout(name) end)
 	elseif msg == MSG_DECLINE then
-		print ("Declined!");
 		if (state == STATE_WAIT_TEAMMATES) then
 			Soloqueue:RemoveInvitee(sender, senderRole);
 		end
@@ -482,7 +494,7 @@ function Soloqueue:LookForGroup()
 	self.CallbackPending = true;
 	eventFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED");
 	local languages = C_LFGList.GetLanguageSearchFilter();
-	C_LFGList.Search(6, LFGListSearchPanel_ParseSearchTerms("Soloqueue"), 0, 8, languages) -- arena 4
+	C_LFGList.Search(FindGroupID[bracket], LFGListSearchPanel_ParseSearchTerms("Soloqueue"), 0, 8, languages)
 end
 
 function Soloqueue:LookForGroupCallback()
@@ -511,7 +523,7 @@ function Soloqueue:LookForGroupCallback()
 				tid = tonumber(tid);
 				groupBracket = tonumber(groupBracket);
 				-- Healer always meet healer requirements!
-				if ((self.CR >= low) and (self.CR < high)) and (groupBracket == bracket) and ((groupHealerReq == healerRequired) or (self.role == "HEALER") or groupHasHealer) then
+				if ((self.CR >= low) and (self.CR < high)) and (groupBracket == bracket) and ((groupHealerReq == healerRequired) or (self.role == "HEALER") or groupHasHealer) and (blacklist[leader] ~= true) then
 					local group = { leader = leader, tid = tid, low = low, high = high };
 					table.insert(self.groups, group);
 				end
@@ -566,7 +578,6 @@ function Soloqueue:ApplyToGroups()
 end
 
 function Soloqueue:ApplyToGroupsCallback(sender)
-	print ("invite from" .. sender)
 	if (sender == self.pendingLeader) then
 		AcceptGroup()
 		eventFrame:UnregisterEvent("PARTY_INVITE_REQUEST");
@@ -576,7 +587,6 @@ function Soloqueue:ApplyToGroupsCallback(sender)
 end
 
 function Soloqueue:UICallback(sender)
-	self:Print("UiCallback")
 	if IsInRaid() or IsInGroup() then
 		StaticPopupSpecial_Hide(LFGInvitePopup);
 		eventFrame:RegisterEvent("LFG_ROLE_CHECK_SHOW");
@@ -603,7 +613,7 @@ function Soloqueue:CreateGroup()
 	self:Print ("No groups found. Creating group for ratings " .. self.CRLower .. ":" .. self.CRUpper);
 
 	self.hid = fastrandom(0x7fffffff);
-	C_LFGList.CreateListing(16, "Soloqueue", 0, 0, "", "Do not join. #TID:" .. self.hid .. " #L:" .. self.CRLower .. " #H:" .. self.CRUpper .. "#B:" .. bracket .. healerString, false, true); -- arena 7
+	C_LFGList.CreateListing(CreateGroupID[bracket], "Soloqueue", 0, 0, "", "Do not join. #TID:" .. self.hid .. " #L:" .. self.CRLower .. " #H:" .. self.CRUpper .. "#B:" .. bracket .. healerString, false, true);
 	self.pendingHandshakes = 0;
 end
 
@@ -612,16 +622,12 @@ function Soloqueue:RosterUpdateEventHandler()
 		local numPlayers = GetNumGroupMembers();
 		if (numPlayers == bracketNumPlayers[bracket]) then
 			eventFrame:UnregisterEvent("GROUP_ROSTER_UPDATE");
+			StaticPopupSpecial_Hide(StaticPopup1)
 			self:Print("Full group. Keep pressing button...")
-			state = STATE_DELIST_GROUP;
+			eventFrame:RegisterEvent("PLAYER_ENTERING_BATTLEGROUND");
+			state = STATE_WAIT_BG_ENTRY;
 		end
 	end
-end
-
-function Soloqueue:DelistGroup()
-	C_LFGList.RemoveListing();
-	eventFrame:RegisterEvent("PLAYER_ENTERING_BATTLEGROUND");
-	state = STATE_WAIT_BG_ENTRY;
 end
 
 function Soloqueue:RoleCheckEventHandler()
@@ -631,7 +637,7 @@ function Soloqueue:RoleCheckEventHandler()
 end
 
 function Soloqueue:BattlegroundEventHandler()
-	self:Print("Entered arena. Press button to check teammates ratings are lefit.")
+	self:Print("Entered arena. Press button to check teammates ratings are legit.")
 	state = STATE_CHECK_TEAMMATES;
 end
 
@@ -659,7 +665,6 @@ function Soloqueue:ResetState()
 	self.CallbackPending = false;
 	C_LFGList.RemoveListing();
 	LeaveParty();
-	state = STATE_GET_RATING;
 	self:Print("Reset state")
 end
 
@@ -688,9 +693,18 @@ end
 
 function Soloqueue:CheckTeamMatesCallback(player, ratings)
 	if (ratings[bracket] < self.CRLower or ratings[bracket] >= self.CRUpper) then
-		local cheater = UnitName(player);
+		local cheater;
+		local name, realm = UnitName(player);
+		if (realm == nil) then
+			cheater = name;
+		else
+			cheater = name .. "-" .. realm;
+		end
 		self:PrintRatings(player, ratings);
-		self.Print("Cheater caught! Do you want to blacklist " .. cheater .. "?")
+		self.Print("Cheater caught! Blacklisted " .. cheater)
+		blacklist[cheater] = true;
+	else
+		self:Print ("Validated " .. player)
 	end
 end
 
@@ -763,4 +777,6 @@ createbuttons{
 }
 
 function Soloqueue:Test()
+	state = STATE_CHECK_TEAMMATES;
+	Soloqueue:CheckTeammates();
 end
