@@ -59,7 +59,7 @@ local SoloqueueLDB_Menu = {
 	{
 		text = "Reset state",
 		notCheckable = true,
-		func = function() Soloqueue:ResetState(); end,
+		func = function() Soloqueue:Print("Reset state."); Soloqueue:ResetState(); end,
 	},
 	{
 		text = "Test",
@@ -132,6 +132,20 @@ function Soloqueue:PrintRatings(player, ratings)
 	end
 end
 
+function Soloqueue:SpecializationChanged(player)
+	if player == "player" and state ~= STATE_GET_RATING then
+		local role = GetSpecializationRole(GetSpecialization());
+		if (role ~= "HEALER") then
+			role = "DAMAGER"
+		end
+		if (role ~= self.role) then
+			self:Print("Player changed role: " .. role .. " Resetting state.")
+			LeaveParty();
+			state = STATE_GET_RATING;
+		end
+	end
+end
+
 function Soloqueue:CallRatingCallback(player, ratings)
 	if state == STATE_GET_RATING then
 		Soloqueue:GetPlayerRatingCallback(ratings);
@@ -145,6 +159,8 @@ local function eventHandler(self, event, ...)
 	if event == "ADDON_LOADED" then
 		eventFrame:UnregisterEvent("ADDON_LOADED");
 		Soloqueue:WelcomeMessage();
+	elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
+		Soloqueue:SpecializationChanged(...);
 	elseif event == "INSPECT_HONOR_UPDATE" then
 		eventFrame:UnregisterEvent("INSPECT_HONOR_UPDATE");
 		Soloqueue:ParseArenaRatings();
@@ -207,19 +223,17 @@ function Soloqueue:OnInitialize()
 	-- Welcome message if required
 	eventFrame:RegisterEvent("ADDON_LOADED");
 
+	-- Watch for specialization changes
+	eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED");
+
 	-- Addon comms
 	eventFrame:RegisterEvent("CHAT_MSG_WHISPER");
 	self.hid = 0;
 
-	-- Default DPS role.
-	SetPVPRoles(false, false, true)
-
 	--hooksecurefunc(C_LFGList, "Search", hook_dummy);
 
 	hooksecurefunc(C_LFGList, "RemoveListing", function(self)
-		if (state == STATE_WAIT_TEAMMATES) then
-			state = STATE_GET_RATING;
-		end
+		state = STATE_GET_RATING;
 	end);
 
 	-- Init context
@@ -474,11 +488,12 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 end
 
 function Soloqueue:GetPlayerRating()
+	self:ResetState();
 	self.role = GetSpecializationRole(GetSpecialization());
-	if (self.role ~= "HEALER") and (self.role ~= "DAMAGER") then
-		self:Print("Invalid talent spec! Must be damage of healer.")
-		return;
+	if (self.role ~= "HEALER") then
+		self.role = "DAMAGER"
 	end
+	SetPVPRoles(false, (self.role == "HEALER"), (self.role == "DAMAGER"));
 	self:PutPlayer("player");
 	self.CallbackPending = true;
 	self:InitRatingRequest();
@@ -613,7 +628,7 @@ function Soloqueue:CreateGroup()
 	self:Print ("No groups found. Creating group for ratings " .. self.CRLower .. ":" .. self.CRUpper);
 
 	self.hid = fastrandom(0x7fffffff);
-	C_LFGList.CreateListing(CreateGroupID[bracket], "Soloqueue", 0, 0, "", "Do not join. #TID:" .. self.hid .. " #L:" .. self.CRLower .. " #H:" .. self.CRUpper .. "#B:" .. bracket .. healerString, false, true);
+	C_LFGList.CreateListing(CreateGroupID[bracket], "Soloqueue", 0, 0, "", "Do not join. #TID:" .. self.hid .. " #L:" .. self.CRLower .. " #H:" .. self.CRUpper .. "#B:" .. bracket .. healerString, false, false);
 	self.pendingHandshakes = 0;
 end
 
@@ -658,14 +673,13 @@ function Soloqueue:CreateMacro()
 
 	DeleteMacro("Soloqueue")
 	CreateMacro("Soloqueue", "Achievement_arena_2v2_7", text)
-	self:Print("Created Soloqueue macro. Spam it to join your game.")
+	self:Print("Created macro \"Soloqueue\" under General Macros. Place it on your bars and spam it to join your game.")
 end
 
 function Soloqueue:ResetState()
 	self.CallbackPending = false;
 	C_LFGList.RemoveListing();
 	LeaveParty();
-	self:Print("Reset state")
 end
 
 function Soloqueue:CheckTeammates()
@@ -777,6 +791,5 @@ createbuttons{
 }
 
 function Soloqueue:Test()
-	state = STATE_CHECK_TEAMMATES;
-	Soloqueue:CheckTeammates();
+
 end
