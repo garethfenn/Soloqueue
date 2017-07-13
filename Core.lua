@@ -1,6 +1,9 @@
 Soloqueue = LibStub("AceAddon-3.0"):NewAddon("Soloqueue", "AceConsole-3.0");
 local eventFrame = nil
 
+-- Debug printing
+local DEBUG = false
+
 -- States
 local STATE_GET_RATING, STATE_LOOK_FOR_GROUP, STATE_APPLY_TO_GROUPS, STATE_WAITING_HANDSHAKE, STATE_WAITING_INVITE,
       STATE_CREATE_GROUP, STATE_WAIT_TEAMMATES, STATE_DELIST_GROUP, STATE_ROLE_CHECK, STATE_WAIT_BG_ENTRY, STATE_CHECK_TEAMMATES = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10;
@@ -61,11 +64,11 @@ local SoloqueueLDB_Menu = {
 		notCheckable = true,
 		func = function() Soloqueue:Print("Reset state."); Soloqueue:ResetState(); end,
 	},
-	{
-		text = "Test",
-		notCheckable = true,
-		func = function() Soloqueue:Test(); end,
-	},
+--	{
+--		text = "Test",
+--		notCheckable = true,
+--		func = function() Soloqueue:Test(); end,
+--	},
 	{
 		text = "",
 		notClickable = true,
@@ -90,6 +93,12 @@ local SoloqueueLDB = LibStub("LibDataBroker-1.1"):NewDataObject("Soloqueue", {
 });
 
 local icon = LibStub("LibDBIcon-1.0");
+
+function Soloqueue:DPrint(string)
+	if DEBUG == true then
+		print(string)
+	end
+end
 
 function Soloqueue:CurPlayer()
 	local head = table.getn(self.player_stack);
@@ -155,7 +164,7 @@ function Soloqueue:CallRatingCallback(player, ratings)
 end
 
 local function eventHandler(self, event, ...)
-	print("got event: " .. event)
+	Soloqueue:DPrint("got event: " .. event)
 	if event == "ADDON_LOADED" then
 		eventFrame:UnregisterEvent("ADDON_LOADED");
 		Soloqueue:WelcomeMessage();
@@ -212,6 +221,7 @@ function Soloqueue:OnInitialize()
 	-- Commands
 	self:RegisterChatCommand("soloqueue", "StateMachine");
 	self:RegisterChatCommand("soloqueue-reset", "ResetState");
+	self:RegisterChatCommand("soloqueue-blacklist", "Blacklist");
 
 	-- Minimap
 	icon:Register("Soloqueue", SoloqueueLDB, self.db.profile.minimap);
@@ -313,10 +323,10 @@ end
 
 function Soloqueue:StateMachine()
 
-	print ("Current state: " .. state)
+	self:DPrint ("Current state: " .. state)
 
 	if (self.CallbackPending == true) then
-		--print ("Callback pending ...")
+		self:DPrint ("Callback pending ...")
 		return;
 	end
 
@@ -395,6 +405,7 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 
 	local name = self:StripOwnRealm(sender);
 	if (blacklist[name] == true) then
+		self:SendChatMessage(sender, tid, MSG_DECLINE);
 		return
 	end
 
@@ -488,6 +499,7 @@ function Soloqueue:ChatMsgEventHandler(string, sender)
 end
 
 function Soloqueue:GetPlayerRating()
+	self.CallbackPending = true;
 	self:ResetState();
 	self.role = GetSpecializationRole(GetSpecialization());
 	if (self.role ~= "HEALER") then
@@ -495,7 +507,7 @@ function Soloqueue:GetPlayerRating()
 	end
 	SetPVPRoles(false, (self.role == "HEALER"), (self.role == "DAMAGER"));
 	self:PutPlayer("player");
-	self.CallbackPending = true;
+	self:Print("Updating player ratings...")
 	self:InitRatingRequest();
 end
 
@@ -503,10 +515,12 @@ function Soloqueue:GetPlayerRatingCallback(ratings)
 	self.CR = ratings[bracket];
 	self.retryAttempts = 0;
 	state = STATE_LOOK_FOR_GROUP;
+	self:Print("Player ratings updated.")
 end
 
 function Soloqueue:LookForGroup()
 	self.CallbackPending = true;
+	self:Print("Searching for groups")
 	eventFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED");
 	local languages = C_LFGList.GetLanguageSearchFilter();
 	C_LFGList.Search(FindGroupID[bracket], LFGListSearchPanel_ParseSearchTerms("Soloqueue"), 0, 8, languages)
@@ -546,7 +560,9 @@ function Soloqueue:LookForGroupCallback()
 		end
 	end
 
-	if (table.getn(self.groups) == 0) or self.retryAttempts == MAX_ATTEMPTS then
+	local numGroups = table.getn(self.groups);
+	if (numGroups == 0) or self.retryAttempts == MAX_ATTEMPTS then
+		self:Print("No groups found. Click to create group.")
 		state = STATE_CREATE_GROUP;
 		if (self.CR >= CR_MINIMUM) then
 			self.CRUpper = ratings[bracket] + CR_WINDOW_INCREMENT;
@@ -576,6 +592,7 @@ function Soloqueue:LookForGroupCallback()
 			self.inviteesDamagerFree = self.inviteesDamagerFree - 1;
 		end
 	else
+		self:Print("Found " .. numGroups .. " groups. Click to apply.")
 		state = STATE_APPLY_TO_GROUPS;
 	end
 
@@ -584,6 +601,7 @@ end
 
 function Soloqueue:ApplyToGroups()
 	state = STATE_WAITING_HANDSHAKE;
+	self:Print("Applying to groups.")
 	self.hid = fastrandom(0x7fffffff);
 	eventFrame:RegisterEvent("PARTY_INVITE_REQUEST")
 	for _,group in pairs(self.groups) do
@@ -616,7 +634,7 @@ end
 function Soloqueue:CreateGroup()
 	state = STATE_WAIT_TEAMMATES
 	local healerString
-	-- If current role is healer, then healer req is removed. Unless it's ratedBG...
+
 	if (healerRequired) then
 		healerString = "#HEALREQ";
 	else
@@ -625,7 +643,7 @@ function Soloqueue:CreateGroup()
 	if ((self.role == "HEALER") and (bracket ~= BRACKET_RATEDBG)) then
 		healerString = healerString .. "#HASHEALER"
 	end
-	self:Print ("No groups found. Creating group for ratings " .. self.CRLower .. ":" .. self.CRUpper);
+	self:Print ("Creating group for ratings " .. self.CRLower .. ":" .. self.CRUpper);
 
 	self.hid = fastrandom(0x7fffffff);
 	C_LFGList.CreateListing(CreateGroupID[bracket], "Soloqueue", 0, 0, "", "Do not join. #TID:" .. self.hid .. " #L:" .. self.CRLower .. " #H:" .. self.CRUpper .. "#B:" .. bracket .. healerString, false, false);
@@ -680,6 +698,11 @@ function Soloqueue:ResetState()
 	self.CallbackPending = false;
 	C_LFGList.RemoveListing();
 	LeaveParty();
+end
+
+function Soloqueue:Blacklist(name)
+	self:Print("Added " .. name .. " to blacklist.")
+	blacklist[name] = true;
 end
 
 function Soloqueue:CheckTeammates()
@@ -740,7 +763,6 @@ local function createbutton(button)
 	b:RegisterForClicks("AnyDown")
 	b:SetAttribute("type","click")
 	b:SetAttribute("clickbutton", v)
-	-- print("proxybutton created: "..button)
 
 	return b
 end
@@ -751,13 +773,6 @@ local function createbuttons(buttons)
 	end
 end
 
---------------------------
--- Dynamic button creating
---------------------------
--- we'll hook into strmatch and check for a specific pattern being used to see if we're /clicking.
--- it's the only sensible place to do this, really!
--- feel free to remove this section if you don't need it :P
-
 local BTN_MATCH_PATTERN = "([^%s]+)%s+([^%s]+)%s*(.*)"
 
 local function findbtn(action, pattern)
@@ -766,12 +781,9 @@ local function findbtn(action, pattern)
 	end
 
 	if pattern == BTN_MATCH_PATTERN then
-		-- we're calling match here again, but it's not actually the SAME function we hooked into
-		-- so no need to worry about infinite recursion
 		name = action:match(BTN_MATCH_PATTERN) or action
 
 		local b = createbutton(name)
-	-- print(b and ("button found: "..name) or ("no button found: "..name))
 	end
 end
 
