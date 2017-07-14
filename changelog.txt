@@ -1,2 +1,6 @@
-﻿0.1 (14/07/2017) First public version
+﻿0.2 (14/07/2017) Updates following first Curseforge review
+- Corrected case sensitive naming
+- Added and removed unused lib deps
+
+0.1 (14/07/2017) First public version
 - Player ratings ignored during early testing
