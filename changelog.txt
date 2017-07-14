@@ -1,2 +1,2 @@
-﻿0.1 (16/06/2017)
-- First public version
+﻿0.1 (14/07/2017) First public version
+- Player ratings ignored during early testing

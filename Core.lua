@@ -24,7 +24,7 @@ local bracketNumPlayers = {2, 3, 5, 10};
 local CreateGroupID = {6, 7, 0, 19}
 local FindGroupID = {4, 4, 0, 9}
 
-local CR_MINIMUM = 1200;
+local CR_MINIMUM = 3000; --1200 Temporarilly increase
 local CR_WINDOW_INCREMENT = 50;
 
 -- Forward declarate some functions

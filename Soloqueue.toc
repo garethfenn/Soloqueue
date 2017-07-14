@@ -1,8 +1,8 @@
-## Interface: 40200
+## Interface: 70200
 ## Version: 0.1
 ## Title: Soloqueue
 ## Author: Gareth Fenn
-## Notes: Solo queue
+## Notes: Soloqueue
 ## SavedVariables: DisplayedWelcomeMessage SoloqueueDB bracket healerRequired blacklist
 
 embeds.xml
