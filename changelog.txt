@@ -1,4 +1,14 @@
-﻿0.2 (14/07/2017) Updates following first Curseforge review
+﻿0.3 (20/07/2017) Bug fixes and feature updates
+- Increase invite timeout to 60. Either invited or declined (via timeout)
+- Remove hack to ignore ratings, instead providing user option
+- Space out some of the menu options a bit better
+- Fix minimap positon so that it is saved
+- Watch players joining/leaving group so we can do certain operations if needed
+    Like resetting if leader left, or if we left after group completed
+    Or increment required healers/DPS depending on what role left
+- Print ratings of joined group. TODO: Need to validate these are reasonable...
+
+0.2 (14/07/2017) Updates following first Curseforge review
 - Corrected case sensitive naming
 - Added and removed unused lib deps
 
